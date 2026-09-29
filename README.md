@@ -1,6 +1,6 @@
 # Signal Seven
 
-[![CI](https://github.com/AnasBabari/stock-predictor-lstm/actions/workflows/ci.yml/badge.svg)](https://github.com/AnasBabari/stock-predictor-lstm/actions)
+[Try the app](https://stock-predictor-lstm-two.vercel.app) · [Local development](#local-development) · [Research records](#research-and-next-steps)
 
 Signal Seven brings historical stock prices, learned forecasts, volatility estimates, and recent
 financial news into one interface. Search for a supported US or UK stock, explore its history,
@@ -11,6 +11,10 @@ will rise or fall**.
 
 The frontend is a React app hosted on Vercel; the backend is a FastAPI service on Render.
 Opening the app wakes the backend automatically. There is no second link to open.
+
+![Signal Seven interface showing a price estimate and separate volatility outlook](docs/verification/ui-success-desktop.png)
+
+Interface example from browser verification, using controlled test data. This image is not a live forecast or evidence of model performance.
 
 ## What you can do
 
@@ -71,7 +75,7 @@ runtime versions, or checkpoints invalidate reuse. Invalid artifacts fall throug
 UK chart history currently follows a separate Yahoo path. See the
 [artifact cache design and security notes](docs/FORECAST_ARTIFACT_CACHE.md).
 
-## Honest limitations
+## Limitations
 
 - This is an experiment, not financial advice or a guarantee of profitable trading.
 - Price forecasts and volatility forecasts answer different questions. A volatility scenario
