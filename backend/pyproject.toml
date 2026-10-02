@@ -65,6 +65,11 @@ ignore = ["E501", "B008"]  # line length handled by formatter, B008 allowed for 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101"]  # allow assert in tests
 
+[tool.ruff.lint.isort]
+# scripts is a repository-owned namespace package outside the backend directory.
+# Explicit classification avoids Windows/Linux source-discovery differences.
+known-first-party = ["scripts"]
+
 [tool.mypy]
 python_version = "3.11"
 

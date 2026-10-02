@@ -66,3 +66,8 @@ desktop/mobile fixture captures were refreshed. The blueprint passed validation 
 official JSON schema. Post-push CI/deployment probes remain separate release checks; the earlier
 production report above describes the pre-release deployment, not evidence that these changes
 were already live.
+
+The first pushed run (`37014217914`) passed the frontend job but stopped at backend Ruff
+import ordering: Linux classified the repository-owned `scripts` namespace differently.
+Backend isort policy now declares that namespace first-party explicitly; the test is retained
+and no forecasting or ledger behavior is changed by this CI correction.
