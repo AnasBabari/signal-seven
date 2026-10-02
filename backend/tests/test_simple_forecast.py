@@ -391,6 +391,7 @@ def test_deployment_checkpoint_never_supplies_selection_or_metrics(monkeypatch) 
     result = sf.train_and_forecast("TSLA", _frame(rows=700))
     assert "gpu_lstm" not in result["model"]["candidate_validation_mae"]
     assert result["backtest"]["metric_source"] == "retrospective_chronological_test"
+    monkeypatch.setattr(sf, "_load_gpu_lstm_model", lambda: None)
     with pytest.raises(ValueError, match="provenance"):
         sf.train_and_forecast("TSLA", _frame(rows=700), "gpu_lstm")
 

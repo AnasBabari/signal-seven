@@ -613,37 +613,30 @@ def merge_news_archive(path: str | Path, records: list[dict[str, Any]]) -> dict[
     return manifest
 
 
-def _resolve_session_closes(sessions: pd.DatetimeIndex) -> list[pd.Timestamp]:
+def _resolve_session_closes(
+    sessions: pd.DatetimeIndex, *, ticker: str = "SPY"
+) -> list[pd.Timestamp]:
     """Efficiently resolve UTC session close timestamps for an entire DatetimeIndex."""
-    try:
-        import pandas_market_calendars as mcal
+    import pandas_market_calendars as mcal
 
-        cal = mcal.get_calendar("NYSE")
-        start_str = sessions.min().strftime("%Y-%m-%d")
-        end_str = sessions.max().strftime("%Y-%m-%d")
-        sched = cal.schedule(start_date=start_str, end_date=end_str)
-        closes: list[pd.Timestamp] = []
-        for s_date in sessions:
-            date_str = s_date.strftime("%Y-%m-%d")
-            if date_str in sched.index and "market_close" in sched.columns:
-                close_val = sched.loc[date_str, "market_close"]
-                closes.append(pd.Timestamp(close_val).tz_convert("UTC").tz_localize(None))
-            else:
-                ts_et = s_date.tz_localize("America/New_York").replace(hour=16, minute=0, second=0)
-                closes.append(ts_et.tz_convert("UTC").tz_localize(None))
-        return closes
-    except Exception:
-        closes = []
-        for s_date in sessions:
-            ts_et = s_date.tz_localize("America/New_York").replace(hour=16, minute=0, second=0)
-            closes.append(ts_et.tz_convert("UTC").tz_localize(None))
-        return closes
+    sessions = pd.DatetimeIndex(sessions).tz_localize(None)
+    calendar = mcal.get_calendar("LSE" if ticker.upper().endswith(".L") else "NYSE")
+    schedule = calendar.schedule(start_date=sessions.min().date(), end_date=sessions.max().date())
+    closes = []
+    for session in sessions:
+        if session not in schedule.index:
+            raise ValueError(f"News cutoff requested for a non-trading session: {session.date()}")
+        closes.append(
+            pd.Timestamp(schedule.loc[session, "market_close"]).tz_convert("UTC").tz_localize(None)
+        )
+    return closes
 
 
 def validate_news_archive(
     records: list[dict[str, Any]],
     sessions: pd.DatetimeIndex,
     min_article_count: int = 1,
+    ticker: str = "SPY",
     *,
     enforce_revision_gate: bool = True,
     flag_threshold_s: float = REVISION_FLAG_THRESHOLD_S,
@@ -658,7 +651,7 @@ def validate_news_archive(
     """
     sessions = pd.DatetimeIndex(sessions)
     if sessions.tz is not None:
-        sessions = sessions.tz_convert(None)
+        sessions = sessions.tz_localize(None)
 
     raw_items = [r for r in (records or []) if isinstance(r, dict) and r.get("published_at")]
     gate_diagnostics: dict[str, Any] | None = None
@@ -688,7 +681,7 @@ def validate_news_archive(
             empty["revision_gate"] = gate_diagnostics
         return empty
 
-    cutoff_timestamps = _resolve_session_closes(sessions)
+    cutoff_timestamps = _resolve_session_closes(sessions, ticker=ticker)
     pub_dt = pd.to_datetime(active_times, utc=True).tz_localize(None).sort_values()
     pub_times = pub_dt.to_numpy(dtype="datetime64[ns]")
 
@@ -755,7 +748,7 @@ def build_causal_news_features(
     """
     sessions = pd.DatetimeIndex(sessions)
     if sessions.tz is not None:
-        sessions = sessions.tz_convert(None)
+        sessions = sessions.tz_localize(None)
 
     out = pd.DataFrame(index=sessions)
     if news_events is None:
@@ -828,7 +821,7 @@ def build_causal_news_features(
     abs_intens: list[float] = []
     hours_since: list[float] = []
 
-    cutoff_timestamps = _resolve_session_closes(sessions)
+    cutoff_timestamps = _resolve_session_closes(sessions, ticker=ticker)
 
     for i, _s_date in enumerate(sessions):
         cutoff_ts = cutoff_timestamps[i]

@@ -9,6 +9,7 @@ labels.  The test result and the refitted candidate are labelled separately.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import random
@@ -69,7 +70,7 @@ TRI_EXCHANGE_TICKERS = (
     "BARC.L",
     "DGE.L",
 )
-MODEL_VERSION = "pooled-price-lstm-v3-tri-exchange"
+MODEL_VERSION = "pooled-price-lstm-v4-global-calendar"
 FEATURE_NAMES = (
     "return_1d",
     "return_2d",
@@ -136,6 +137,8 @@ class GlobalPriceDataset:
     origin_positions: np.ndarray
     target_end_positions: np.ndarray
     origin_dates: np.ndarray
+    target_end_dates: np.ndarray
+    shared_cutoffs: tuple[str, str]
     split_train: np.ndarray
     split_validation: np.ndarray
     split_test: np.ndarray
@@ -251,12 +254,19 @@ def build_global_price_dataset(
                     "(same-date SPY at 16:00 ET postdates the 16:30 London close)."
                 )
 
+    normalized_frames = {ticker: _normalise_ohlcv(frames[ticker]) for ticker in tickers}
+    calendar = pd.DatetimeIndex(
+        sorted(set().union(*(set(data.index) for data in normalized_frames.values())))
+    )
+    train_cutoff = calendar[int(len(calendar) * 0.70)]
+    test_cutoff = calendar[int(len(calendar) * 0.85)]
     sequences: list[np.ndarray] = []
     targets: list[np.ndarray] = []
     ticker_indices: list[int] = []
     origins: list[int] = []
     target_ends: list[int] = []
     dates: list[str] = []
+    end_dates: list[str] = []
     train_indices: list[int] = []
     validation_indices: list[int] = []
     test_indices: list[int] = []
@@ -265,12 +275,12 @@ def build_global_price_dataset(
     data_as_of: dict[str, str] = {}
 
     for ticker_index, ticker in enumerate(tickers):
-        data = _normalise_ohlcv(frames[ticker])
+        data = normalized_frames[ticker]
         feature_frame = build_price_features(data)
 
         if resolved_mode == "price_plus_news":
             events = parsed_archives[ticker]
-            diag = validate_news_archive(events, data.index)
+            diag = validate_news_archive(events, data.index, ticker=ticker)
             news_coverage_summary[ticker] = diag
             if not diag["is_valid"]:
                 raise ValueError(
@@ -296,8 +306,8 @@ def build_global_price_dataset(
         feature_positions = pd.Series(np.arange(len(data), dtype=np.int64), index=data.index)
         feature_values = feature_frame.to_numpy(dtype=np.float32)
         close = np.log(data["Close"])
-        train_boundary = int(len(data) * 0.70)
-        test_boundary = int(len(data) * 0.85)
+        if feature_frame.empty or feature_frame.index[-1] != data.index[-1]:
+            raise ValueError(f"{ticker}: latest feature origin differs from data origin")
         current_sequences[ticker] = feature_values[-settings.lookback :].copy()
         if len(current_sequences[ticker]) != settings.lookback:
             raise ValueError(f"{ticker} does not have enough valid feature rows")
@@ -325,11 +335,12 @@ def build_global_price_dataset(
             origins.append(origin)
             target_ends.append(target_end)
             dates.append(origin_date.date().isoformat())
-            if target_end < train_boundary:
+            end_dates.append(data.index[target_end].date().isoformat())
+            if data.index[target_end] < train_cutoff:
                 train_indices.append(row)
-            elif origin >= train_boundary and target_end < test_boundary:
+            elif origin_date >= train_cutoff and data.index[target_end] < test_cutoff:
                 validation_indices.append(row)
-            elif origin >= test_boundary:
+            elif origin_date >= test_cutoff:
                 test_indices.append(row)
 
     split_arrays = tuple(
@@ -349,7 +360,9 @@ def build_global_price_dataset(
         ticker_indices=np.asarray(ticker_indices, dtype=np.int64),
         origin_positions=np.asarray(origins, dtype=np.int64),
         target_end_positions=np.asarray(target_ends, dtype=np.int64),
-        origin_dates=np.asarray(dates),
+        origin_dates=np.asarray(dates, dtype="datetime64[D]"),
+        target_end_dates=np.asarray(end_dates, dtype="datetime64[D]"),
+        shared_cutoffs=(train_cutoff.date().isoformat(), test_cutoff.date().isoformat()),
         split_train=split_arrays[0],
         split_validation=split_arrays[1],
         split_test=split_arrays[2],
@@ -610,11 +623,47 @@ def _predict(
     return standard * scalers["target_std"] + scalers["target_mean"]
 
 
+def dataset_protocol(dataset):
+    digest = hashlib.sha256()
+    for array in (
+        dataset.sequences,
+        dataset.targets,
+        dataset.ticker_indices,
+        dataset.origin_dates,
+        dataset.target_end_dates,
+        dataset.split_train,
+        dataset.split_validation,
+        dataset.split_test,
+    ):
+        digest.update(np.ascontiguousarray(array).tobytes())
+    return {
+        "version": "global-calendar-purged-v1",
+        "dataset_sha256": digest.hexdigest(),
+        "shared_cutoffs": list(dataset.shared_cutoffs),
+        "train_target_max": str(dataset.target_end_dates[dataset.split_train].max()),
+        "validation_origin_min": str(dataset.origin_dates[dataset.split_validation].min()),
+        "validation_target_max": str(dataset.target_end_dates[dataset.split_validation].max()),
+        "test_origin_min": str(dataset.origin_dates[dataset.split_test].min()),
+        "evidence_scope": "development_retrospective",
+    }
+
+
 def _save_checkpoint(torch, model, scalers, dataset, settings, path, role, epochs):
+    indices = (
+        dataset.split_train
+        if role == "validation_selected_model"
+        else np.arange(len(dataset.targets))
+    )
     torch.save(
         {
             "model_version": MODEL_VERSION,
             "training_procedure_version": "best-epoch-refit-v1",
+            "feature_definition_version": "stationary-zero-range-neutral-v2",
+            "protocol": dataset_protocol(dataset),
+            "training_target_max": str(dataset.target_end_dates[indices].max()),
+            "scaler_target_max": str(dataset.target_end_dates[indices].max()),
+            "training_rows_sha256": hashlib.sha256(indices.tobytes()).hexdigest(),
+            "scaler_rows_sha256": hashlib.sha256(indices.tobytes()).hexdigest(),
             "artifact_role": role,
             "training_epochs": epochs,
             "state_dict": {key: value.detach().cpu() for key, value in model.state_dict().items()},
@@ -627,6 +676,7 @@ def _save_checkpoint(torch, model, scalers, dataset, settings, path, role, epoch
         },
         path,
     )
+    Path(str(path) + ".sha256").write_text(hashlib.sha256(path.read_bytes()).hexdigest() + "\n")
 
 
 def train_cuda_price_model(
@@ -638,6 +688,12 @@ def train_cuda_price_model(
 ) -> dict[str, Any]:
     """Train, test, refit, save, and return a CUDA price-model report."""
     settings = config or PriceTrainingConfig()
+    protocol = dataset_protocol(dataset)
+    if not (
+        protocol["train_target_max"] < protocol["validation_origin_min"]
+        and protocol["validation_target_max"] < protocol["test_origin_min"]
+    ):
+        raise ValueError("Global calendar partitions overlap")
     output = Path(output_dir)
     if any(
         (output / name).exists()
@@ -673,6 +729,17 @@ def train_cuda_price_model(
             device_name="cuda",
         )
     )
+    output.mkdir(parents=True, exist_ok=True)
+    _save_checkpoint(
+        torch,
+        selection_model,
+        selection_scalers,
+        dataset,
+        settings,
+        output / "selection_model.pt",
+        "validation_selected_model",
+        selected_epochs,
+    )
     validation_prediction = _predict(
         torch,
         selection_model,
@@ -688,17 +755,6 @@ def train_cuda_price_model(
         np.asarray(dataset.ticker_names)[dataset.ticker_indices[dataset.split_validation]],
     )
     validation_metrics = validation_evidence["pooled"]
-    output.mkdir(parents=True, exist_ok=True)
-    _save_checkpoint(
-        torch,
-        selection_model,
-        selection_scalers,
-        dataset,
-        settings,
-        output / "selection_model.pt",
-        "validation_selected_model",
-        selected_epochs,
-    )
     selection = {
         "epochs": selected_epochs,
         "best_epoch": selected_epochs,
@@ -706,7 +762,8 @@ def train_cuda_price_model(
         "best_validation_scaled_huber": best_validation_loss,
         "metrics": validation_metrics,
         "validation_evidence": validation_evidence,
-        "checkpoint": "selection_model.pt",
+        "checkpoint": str((output / "selection_model.pt").resolve()),
+        "protocol": protocol,
     }
     if validation_only:
         report = {
@@ -795,6 +852,7 @@ def train_cuda_price_model(
     report = {
         "model_version": MODEL_VERSION,
         "status": "development_candidate",
+        "protocol": protocol,
         "feature_mode": dataset.feature_mode,
         "feature_count": len(dataset.feature_names),
         "device": str(torch.cuda.get_device_name(0)),
@@ -810,7 +868,7 @@ def train_cuda_price_model(
         "untouched_test": {
             "evaluated_checkpoint": "selection_model.pt",
             "evaluates_deployment_refit": False,
-            "metric_source": "chronological_15_percent_test_after_validation_selection",
+            "metric_source": "retrospective_global_calendar_test",
             "pooled": pooled_test_metrics,
             "per_ticker": per_ticker,
         },

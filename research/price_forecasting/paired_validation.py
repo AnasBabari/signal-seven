@@ -11,7 +11,13 @@ def checkpoint_predictions(dataset, path):
     import torch
     from torch import nn
 
-    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+    from .checkpoint_contract import load_verified_checkpoint
+
+    checkpoint = load_verified_checkpoint(
+        path,
+        feature_names=dataset.feature_names,
+        historical_origin=str(dataset.origin_dates[dataset.split_validation].min()),
+    )
     if checkpoint.get("artifact_role") != "validation_selected_model":
         raise ValueError("Inference requires the evaluated selection checkpoint")
     if checkpoint["feature_names"] != list(dataset.feature_names) or checkpoint[

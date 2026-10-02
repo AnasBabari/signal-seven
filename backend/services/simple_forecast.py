@@ -1,9 +1,9 @@
 """Small, auditable seven-session price forecasting benchmark.
 
-The production endpoint deliberately supports five liquid US equities.  It
+The production endpoint supports the active US/UK universe.  It
 trains quickly from completed daily OHLCV bars, chooses between two learned
 models on a chronological validation block, and reports performance on a
-later untouched test block.  Persistence is a comparison only; it never
+later retrospective test block.  Persistence is a comparison only; it never
 replaces the learned path returned to the user.
 """
 
@@ -14,6 +14,7 @@ import functools
 import hashlib
 import json
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -306,32 +307,16 @@ _gpu_signature = None
 
 
 def _checkpoint_signature() -> str:
-    # Scan is order- and cwd-independent: the same physical checkpoint must
-    # produce the same signature whether the process was started from the
-    # repo root, backend/, or anywhere else, otherwise the durable-artifact
-    # cache key (and any cold-process reload) silently diverges.
-    found: dict[str, tuple[int, str]] = {}
-    for root in (
-        Path.cwd(),
-        Path(__file__).resolve().parents[2],
-        Path(__file__).resolve().parents[1],
-    ):
-        for relative in (
-            "tri_exchange_gpu_v2/model.pt",
-            "tri_exchange_gpu_v1/model.pt",
-            "simple_price_gpu_v2/baseline_price_only/model.pt",
-        ):
-            path = (root / "artifacts" / relative).resolve()
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
-            found[str(path)] = (
-                stat.st_size,
-                hashlib.sha256(path.read_bytes()).hexdigest(),
-            )
-    entries = sorted(found.items())
-    return hashlib.sha256(repr(entries).encode()).hexdigest()
+    configured = os.getenv("PRICE_GPU_CHECKPOINT_PATH", "").strip()
+    if not configured:
+        return "no_verified_price_gpu_configured"
+    path = Path(configured).resolve()
+    try:
+        return hashlib.sha256(
+            path.read_bytes() + Path(str(path) + ".sha256").read_bytes()
+        ).hexdigest()
+    except OSError:
+        return "unavailable_configured_checkpoint:" + str(path)
 
 
 def _forecast_cache_key(symbol: str, frame: pd.DataFrame, model: str) -> str:
@@ -581,53 +566,30 @@ def _clip_predictions(predicted: np.ndarray, reference_targets: np.ndarray) -> n
 
 @functools.lru_cache(maxsize=1)
 def _load_gpu_lstm_model() -> tuple[Any, dict[str, Any], list[str]] | None:
+    # Only explicitly configured, self-describing artifacts may serve a point prediction.
+    path = os.getenv("PRICE_GPU_CHECKPOINT_PATH", "").strip()
+    if not path:
+        return None
     try:
-        from pathlib import Path
-
         import torch
-        from research.price_forecasting.gpu_pipeline import PriceTrainingConfig, _build_model
+        from research.price_forecasting.checkpoint_contract import load_verified_checkpoint
+        from research.price_forecasting.gpu_pipeline import (
+            FEATURE_NAMES,
+            PriceTrainingConfig,
+            _build_model,
+        )
 
-        candidates = [
-            Path.cwd() / "artifacts" / "tri_exchange_gpu_v2" / "model.pt",
-            Path(__file__).resolve().parents[2] / "artifacts" / "tri_exchange_gpu_v2" / "model.pt",
-            Path(__file__).resolve().parents[1] / "artifacts" / "tri_exchange_gpu_v2" / "model.pt",
-            Path.cwd() / "artifacts" / "tri_exchange_gpu_v1" / "model.pt",
-            Path(__file__).resolve().parents[2] / "artifacts" / "tri_exchange_gpu_v1" / "model.pt",
-            Path(__file__).resolve().parents[1] / "artifacts" / "tri_exchange_gpu_v1" / "model.pt",
-            Path.cwd() / "artifacts" / "simple_price_gpu_v2" / "baseline_price_only" / "model.pt",
-            Path(__file__).resolve().parents[2]
-            / "artifacts"
-            / "simple_price_gpu_v2"
-            / "baseline_price_only"
-            / "model.pt",
-            Path(__file__).resolve().parents[1]
-            / "artifacts"
-            / "simple_price_gpu_v2"
-            / "baseline_price_only"
-            / "model.pt",
-        ]
-        ckpt_path = next((p for p in candidates if p.is_file()), None)
-        if not ckpt_path:
-            return None
-        ckpt = torch.load(ckpt_path, map_location="cpu")
-        ticker_names = list(ckpt.get("ticker_names") or ["AAPL", "GOOGL", "MSFT", "NVDA", "TSLA"])
-        embed_dim = int(
-            ckpt.get("embed_dim") or ckpt["state_dict"]["ticker_embedding.weight"].shape[1]
-        )
-        hidden_size = int(
-            ckpt.get("config", {}).get("hidden_size") or ckpt["state_dict"]["norm.weight"].shape[0]
-        )
-        layers = int(ckpt.get("config", {}).get("layers") or 2)
-        model_config = PriceTrainingConfig(
-            hidden_size=hidden_size, layers=layers, embed_dim=embed_dim
-        )
-        model = _build_model(
-            torch, torch.nn, 25, len(ticker_names), model_config, embed_dim=embed_dim
-        )
-        model.load_state_dict(ckpt["state_dict"])
+        checkpoint = load_verified_checkpoint(path, feature_names=FEATURE_NAMES)
+        if checkpoint.get("feature_mode") != "price_only":
+            raise ValueError("Only verified price-only checkpoint schemas are supported")
+        config = PriceTrainingConfig(**checkpoint["config"])
+        tickers = checkpoint["ticker_names"]
+        model = _build_model(torch, torch.nn, len(FEATURE_NAMES), len(tickers), config)
+        model.load_state_dict(checkpoint["state_dict"], strict=True)
         model.eval()
-        return model, ckpt["scalers"], ticker_names
+        return model, checkpoint["scalers"], tickers
     except Exception:
+        logger.warning("Price GPU checkpoint rejected: unsupported schema or unverified provenance")
         return None
 
 
@@ -735,10 +697,54 @@ def _train_and_forecast_locked(
         validation_predictions[name] = predicted
         validation_scores[name] = float(mean_absolute_error(targets[validation_mask], predicted))
 
-    # Deployment refits lack pre-evaluation training/scaler provenance and must
-    # never enter historical selection or supply historical metrics.
+    # Explicit checkpoint inference is experimental and supplies no historical metrics.
     if normalized_model in ("gpu_lstm", "lstm"):
-        raise ValueError("GPU price evaluation unavailable: checkpoint provenance is unverified.")
+        loaded = _load_gpu_lstm_model()
+        if loaded is None or symbol not in loaded[2]:
+            raise ValueError(
+                "GPU price prediction unavailable: checkpoint provenance is unverified."
+            )
+        import torch
+
+        model, scalers, tickers = loaded
+        latest = dataset.features.iloc[-60:].to_numpy(dtype=np.float32)
+        mean, std = np.asarray(scalers["feature_mean"]), np.asarray(scalers["feature_std"])
+        with torch.no_grad():
+            raw = model(
+                torch.tensor((latest - mean) / std).unsqueeze(0).float(),
+                torch.tensor([tickers.index(symbol)]),
+            )
+        returns = raw.numpy()[0] * np.asarray(scalers["target_std"]) + np.asarray(
+            scalers["target_mean"]
+        )
+        prices = float(frame["Close"].iloc[-1]) * np.exp(returns)
+        if not np.isfinite(prices).all() or (prices <= 0).any():
+            raise ValueError("GPU checkpoint produced invalid prices")
+        dates, calendar = future_trading_dates(symbol, frame.index[-1], FORECAST_DAYS)
+        return {
+            "ticker": symbol,
+            "data_as_of": data_as_of,
+            "current_price": float(frame["Close"].iloc[-1]),
+            "forecast_days": 7,
+            "predicted_prices": prices.tolist(),
+            "future_dates": dates,
+            "historical_dates": [v.date().isoformat() for v in frame.index[-90:]],
+            "historical_prices": frame["Close"].iloc[-90:].tolist(),
+            "model": {
+                "name": "gpu_lstm",
+                "requested": normalized_model,
+                "selected": "gpu_lstm",
+                "selection_reason": "explicit_verified_checkpoint",
+                "status": "experimental_point_only",
+            },
+            "backtest": None,
+            "evaluation": {
+                "status": "unavailable",
+                "reason": "Serving checkpoint is not historical evaluation evidence",
+            },
+            "provenance": {**frame.attrs, "calendar": calendar, "feature_origin": data_as_of},
+        }
+
     if normalized_model not in {"auto", *candidates}:
         raise ValueError("Unsupported explicit price model request.")
     selected_name = (
@@ -755,11 +761,46 @@ def _train_and_forecast_locked(
         evaluation_model.predict(labelled_features[test_mask]), targets[development_mask]
     )
     metrics = _metrics(targets[test_mask], test_prediction)
+    majority = np.where(
+        (targets[train_mask] > 0).sum(axis=0) >= (targets[train_mask] < 0).sum(axis=0), 1, -1
+    )
+    metrics["majority_direction_accuracy"] = float(np.mean(np.sign(targets[test_mask]) == majority))
 
     # The uncertainty band is calibrated on validation residuals only.
     validation_residuals = targets[validation_mask] - validation_predictions[selected_name]
     residual_low = np.quantile(validation_residuals, 0.10, axis=0)
     residual_high = np.quantile(validation_residuals, 0.90, axis=0)
+    evaluation_band = {
+        "scope": "retrospective_evaluation_model",
+        "current_refit_coverage": "unavailable",
+        "per_horizon": [
+            {
+                "sessions": h + 1,
+                "coverage": float(
+                    np.mean(
+                        (targets[test_mask, h] >= test_prediction[:, h] + residual_low[h])
+                        & (targets[test_mask, h] <= test_prediction[:, h] + residual_high[h])
+                    )
+                ),
+                "lower_tail_miss": float(
+                    np.mean(targets[test_mask, h] < test_prediction[:, h] + residual_low[h])
+                ),
+                "upper_tail_miss": float(
+                    np.mean(targets[test_mask, h] > test_prediction[:, h] + residual_high[h])
+                ),
+                "mean_width_pct_of_origin": float(
+                    np.mean(
+                        100
+                        * (
+                            np.exp(test_prediction[:, h] + residual_high[h])
+                            - np.exp(test_prediction[:, h] + residual_low[h])
+                        )
+                    )
+                ),
+            }
+            for h in range(FORECAST_DAYS)
+        ],
+    }
 
     production_model = _candidate_models()[selected_name]
     production_model.fit(labelled_features, targets)
@@ -775,6 +816,11 @@ def _train_and_forecast_locked(
         "target": "direct_cumulative_log_returns_1_to_7_sessions",
         "selection": "lowest validation MAE among learned candidates",
         "candidate_validation_mae": validation_scores,
+        "requested": normalized_model,
+        "selected": selected_name,
+        "selection_reason": "explicit_request"
+        if normalized_model != "auto"
+        else "minimum_fixed_candidate_validation_mae",
     }
 
     current_price = float(frame["Close"].iloc[-1])
@@ -819,6 +865,7 @@ def _train_and_forecast_locked(
             "interval_coverage": "unavailable",
             **metrics,
         },
+        "historical_error_band_evidence": evaluation_band,
         "provenance": {
             "data_provider": str(frame.attrs.get("data_provider", "unknown")),
             "market_data_cache": str(frame.attrs.get("market_data_cache", "unknown")),

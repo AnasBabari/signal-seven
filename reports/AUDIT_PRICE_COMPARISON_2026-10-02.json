@@ -1,0 +1,235 @@
+{
+  "status": "development_retrospective",
+  "protocol": {
+    "version": "global-calendar-purged-v1",
+    "dataset_sha256": "3e1d4c86c415178c405f6749463cd14546f6ba2b174cd2722c0e55c3c0df8d55",
+    "shared_cutoffs": [
+      "2025-06-24",
+      "2026-01-28"
+    ],
+    "train_target_max": "2025-06-23",
+    "validation_origin_min": "2025-06-24",
+    "validation_target_max": "2026-01-27",
+    "test_origin_min": "2026-01-28",
+    "evidence_scope": "development_retrospective",
+    "sources": {
+      "AAPL": {
+        "path": "C:\\Users\\Babar\\stock-predictor-lstm\\data\\tri_exchange\\cache\\AAPL.parquet",
+        "sha256": "bf5c80c5e6acc81136103b713feceb86a7913e15fbc6677952eaa0050ccbf9cc",
+        "provider_equivalence": "unverified"
+      },
+      "ARM": {
+        "path": "C:\\Users\\Babar\\stock-predictor-lstm\\data\\tri_exchange\\cache\\ARM.parquet",
+        "sha256": "d9bfb9a36d86fac106e62f8a58cdff4bd4dd44bca0461796894e7eb3a3b8ea97",
+        "provider_equivalence": "unverified"
+      },
+      "BP.L": {
+        "path": "C:\\Users\\Babar\\stock-predictor-lstm\\data\\tri_exchange\\cache\\BP.L.parquet",
+        "sha256": "d40f7ceb81a2bc07fb24dfd7c77a979c1d49ffa373b3600f96eaf052fe65e185",
+        "provider_equivalence": "unverified"
+      }
+    },
+    "fixed_candidates": [
+      "ridge_alpha100",
+      "lstm_2epochs",
+      "persistence",
+      "train_majority_direction"
+    ]
+  },
+  "ridge": {
+    "mae_percent": 3.145866087910906,
+    "rmse_percent": 4.451833964338441,
+    "persistence_mae_percent": 3.0277877239104622,
+    "persistence_rmse_percent": 4.37317627621911,
+    "relative_mae_vs_persistence": 1.0389982306447636,
+    "relative_rmse_vs_persistence": 1.017986397792164,
+    "direction_accuracy": 0.49287371561153465,
+    "majority_direction_accuracy": 0.5200530328140537,
+    "zero_return_fraction": 0.0016572754391779914,
+    "per_horizon": [
+      {
+        "day": 1,
+        "mae_percent": 1.3799715962680084,
+        "rmse_percent": 2.055374337399715,
+        "persistence_mae_percent": 1.330190548653948,
+        "persistence_rmse_percent": 2.007751214984547,
+        "relative_mae_vs_persistence": 1.0374239973847619,
+        "relative_rmse_vs_persistence": 1.023719633219365,
+        "direction_accuracy": 0.4872389791183295,
+        "majority_direction_accuracy": 0.5266821345707656,
+        "zero_return_fraction": 0.002320185614849188
+      },
+      {
+        "day": 2,
+        "mae_percent": 2.1203020774435775,
+        "rmse_percent": 2.9897821206272828,
+        "persistence_mae_percent": 2.033428957701579,
+        "persistence_rmse_percent": 2.914706594211982,
+        "relative_mae_vs_persistence": 1.042722475950275,
+        "relative_rmse_vs_persistence": 1.0257574901584898,
+        "direction_accuracy": 0.48491879350348027,
+        "majority_direction_accuracy": 0.4872389791183295,
+        "zero_return_fraction": 0.002320185614849188
+      },
+      {
+        "day": 3,
+        "mae_percent": 2.7575120614674566,
+        "rmse_percent": 3.7784635361231036,
+        "persistence_mae_percent": 2.6334018988469965,
+        "persistence_rmse_percent": 3.661506512960861,
+        "relative_mae_vs_persistence": 1.0471292143727853,
+        "relative_rmse_vs_persistence": 1.0319423228521492,
+        "direction_accuracy": 0.48259860788863107,
+        "majority_direction_accuracy": 0.5011600928074246,
+        "zero_return_fraction": 0.002320185614849188
+      },
+      {
+        "day": 4,
+        "mae_percent": 3.3661054165930606,
+        "rmse_percent": 4.4865891187264175,
+        "persistence_mae_percent": 3.189824201088863,
+        "persistence_rmse_percent": 4.359287354807462,
+        "relative_mae_vs_persistence": 1.055263614666922,
+        "relative_rmse_vs_persistence": 1.0292024254328098,
+        "direction_accuracy": 0.4733178654292343,
+        "majority_direction_accuracy": 0.5220417633410673,
+        "zero_return_fraction": 0.002320185614849188
+      },
+      {
+        "day": 5,
+        "mae_percent": 3.7962075532736965,
+        "rmse_percent": 5.04582856916377,
+        "persistence_mae_percent": 3.628413205121478,
+        "persistence_rmse_percent": 4.927599029330098,
+        "relative_mae_vs_persistence": 1.0462445533809044,
+        "relative_rmse_vs_persistence": 1.0239933361318452,
+        "direction_accuracy": 0.48491879350348027,
+        "majority_direction_accuracy": 0.5382830626450116,
+        "zero_return_fraction": 0.002320185614849188
+      },
+      {
+        "day": 6,
+        "mae_percent": 4.175987954669813,
+        "rmse_percent": 5.555165977108125,
+        "persistence_mae_percent": 4.057349814253682,
+        "persistence_rmse_percent": 5.4897726070311,
+        "relative_mae_vs_persistence": 1.0292403036088604,
+        "relative_rmse_vs_persistence": 1.0119118540526197,
+        "direction_accuracy": 0.5104408352668214,
+        "majority_direction_accuracy": 0.5336426914153132,
+        "zero_return_fraction": 0.0
+      },
+      {
+        "day": 7,
+        "mae_percent": 4.424975955660726,
+        "rmse_percent": 5.90270235823408,
+        "persistence_mae_percent": 4.32190544170669,
+        "persistence_rmse_percent": 5.875139493797721,
+        "relative_mae_vs_persistence": 1.0238483963483789,
+        "relative_rmse_vs_persistence": 1.00469144000163,
+        "direction_accuracy": 0.5266821345707656,
+        "majority_direction_accuracy": 0.531322505800464,
+        "zero_return_fraction": 0.0
+      }
+    ]
+  },
+  "gpu": {
+    "mae_percent": 3.033387105535015,
+    "rmse_percent": 4.3727530542927795,
+    "persistence_mae_percent": 3.0277877239104622,
+    "persistence_rmse_percent": 4.37317627621911,
+    "relative_mae_vs_persistence": 1.0018493309753302,
+    "relative_rmse_vs_persistence": 0.9999032232181831,
+    "direction_accuracy": 0.5064633742127942,
+    "majority_direction_accuracy": 0.5200530328140537,
+    "zero_return_fraction": 0.0016572754391779914,
+    "per_horizon": [
+      {
+        "day": 1,
+        "mae_percent": 1.3502335904508116,
+        "rmse_percent": 2.0239454243436565,
+        "persistence_mae_percent": 1.330190548653948,
+        "persistence_rmse_percent": 2.007751214984547,
+        "relative_mae_vs_persistence": 1.0150677974799518,
+        "relative_rmse_vs_persistence": 1.0080658446316688,
+        "direction_accuracy": 0.46403712296983757,
+        "majority_direction_accuracy": 0.5266821345707656,
+        "zero_return_fraction": 0.002320185614849188
+      },
+      {
+        "day": 2,
+        "mae_percent": 2.0498072899714423,
+        "rmse_percent": 2.926351700091892,
+        "persistence_mae_percent": 2.033428957701579,
+        "persistence_rmse_percent": 2.914706594211982,
+        "relative_mae_vs_persistence": 1.0080545387178788,
+        "relative_rmse_vs_persistence": 1.003995292666176,
+        "direction_accuracy": 0.5034802784222738,
+        "majority_direction_accuracy": 0.4872389791183295,
+        "zero_return_fraction": 0.002320185614849188
+      },
+      {
+        "day": 3,
+        "mae_percent": 2.6393320935581643,
+        "rmse_percent": 3.6551344742465743,
+        "persistence_mae_percent": 2.6334018988469965,
+        "persistence_rmse_percent": 3.661506512960861,
+        "relative_mae_vs_persistence": 1.0022519140408321,
+        "relative_rmse_vs_persistence": 0.9982597221412194,
+        "direction_accuracy": 0.5197215777262181,
+        "majority_direction_accuracy": 0.5011600928074246,
+        "zero_return_fraction": 0.002320185614849188
+      },
+      {
+        "day": 4,
+        "mae_percent": 3.1827605648946995,
+        "rmse_percent": 4.325097994064812,
+        "persistence_mae_percent": 3.189824201088863,
+        "persistence_rmse_percent": 4.359287354807462,
+        "relative_mae_vs_persistence": 0.9977855719472715,
+        "relative_rmse_vs_persistence": 0.992157121575171,
+        "direction_accuracy": 0.5104408352668214,
+        "majority_direction_accuracy": 0.5220417633410673,
+        "zero_return_fraction": 0.002320185614849188
+      },
+      {
+        "day": 5,
+        "mae_percent": 3.6480277773495153,
+        "rmse_percent": 4.9710374051767365,
+        "persistence_mae_percent": 3.628413205121478,
+        "persistence_rmse_percent": 4.927599029330098,
+        "relative_mae_vs_persistence": 1.0054058264919639,
+        "relative_rmse_vs_persistence": 1.0088153227541616,
+        "direction_accuracy": 0.4988399071925754,
+        "majority_direction_accuracy": 0.5382830626450116,
+        "zero_return_fraction": 0.002320185614849188
+      },
+      {
+        "day": 6,
+        "mae_percent": 4.0128548208033425,
+        "rmse_percent": 5.389484894104838,
+        "persistence_mae_percent": 4.057349814253682,
+        "persistence_rmse_percent": 5.4897726070311,
+        "relative_mae_vs_persistence": 0.9890334835576597,
+        "relative_rmse_vs_persistence": 0.9817319003709156,
+        "direction_accuracy": 0.5336426914153132,
+        "majority_direction_accuracy": 0.5336426914153132,
+        "zero_return_fraction": 0.0
+      },
+      {
+        "day": 7,
+        "mae_percent": 4.350693601717128,
+        "rmse_percent": 5.946650702109193,
+        "persistence_mae_percent": 4.32190544170669,
+        "persistence_rmse_percent": 5.875139493797721,
+        "relative_mae_vs_persistence": 1.0066609879366242,
+        "relative_rmse_vs_persistence": 1.012171831560249,
+        "direction_accuracy": 0.5150812064965197,
+        "majority_direction_accuracy": 0.531322505800464,
+        "zero_return_fraction": 0.0
+      }
+    ]
+  },
+  "gpu_training_seconds": 2.0669143999984954,
+  "artifacts": "C:\\Users\\Babar\\stock-predictor-lstm\\artifacts\\audit_price_comparison_20261002"
+}

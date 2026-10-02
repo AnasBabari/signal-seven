@@ -1,0 +1,36 @@
+{
+  "version": "global-calendar-purged-v1",
+  "dataset_sha256": "3e1d4c86c415178c405f6749463cd14546f6ba2b174cd2722c0e55c3c0df8d55",
+  "shared_cutoffs": [
+    "2025-06-24",
+    "2026-01-28"
+  ],
+  "train_target_max": "2025-06-23",
+  "validation_origin_min": "2025-06-24",
+  "validation_target_max": "2026-01-27",
+  "test_origin_min": "2026-01-28",
+  "evidence_scope": "development_retrospective",
+  "sources": {
+    "AAPL": {
+      "path": "C:\\Users\\Babar\\stock-predictor-lstm\\data\\tri_exchange\\cache\\AAPL.parquet",
+      "sha256": "bf5c80c5e6acc81136103b713feceb86a7913e15fbc6677952eaa0050ccbf9cc",
+      "provider_equivalence": "unverified"
+    },
+    "ARM": {
+      "path": "C:\\Users\\Babar\\stock-predictor-lstm\\data\\tri_exchange\\cache\\ARM.parquet",
+      "sha256": "d9bfb9a36d86fac106e62f8a58cdff4bd4dd44bca0461796894e7eb3a3b8ea97",
+      "provider_equivalence": "unverified"
+    },
+    "BP.L": {
+      "path": "C:\\Users\\Babar\\stock-predictor-lstm\\data\\tri_exchange\\cache\\BP.L.parquet",
+      "sha256": "d40f7ceb81a2bc07fb24dfd7c77a979c1d49ffa373b3600f96eaf052fe65e185",
+      "provider_equivalence": "unverified"
+    }
+  },
+  "fixed_candidates": [
+    "ridge_alpha100",
+    "lstm_2epochs",
+    "persistence",
+    "train_majority_direction"
+  ]
+}

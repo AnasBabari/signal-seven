@@ -1,5 +1,7 @@
 # Price-model training correction and next comparison
 
+> Audit availability check (2 October 2026): This archived summary contains historical development results. The pooled split implementation was subsequently repaired to use shared calendar cutoffs. These summaries do not establish independent current performance. Local referenced artifact availability: `artifacts/price_validation_comparison_v1`: 0 files; `artifacts/price_validation_small_v1`: 0 files; `artifacts/tri_exchange_gpu_v2`: 1 files. Missing outputs cannot be reproduced or verified from this checkout; no missing evidence has been reconstructed.
+
 The existing `artifacts/tri_exchange_gpu_v2` run is preserved. Its pooled test
 MAE ratio versus no change is 1.00326, so it did not demonstrate an aggregate
 MAE improvement. Its test metrics describe the validation-selected epoch-1
