@@ -2808,3 +2808,24 @@ strong.mono.flat {
   color: var(--text-primary);
   margin: 2px 0 0;
 }
+
+/* Recovery, keyboard inspection and compact company search. */
+.input-field-group { position: relative; min-width: 0; }
+.stock-suggestions { position: absolute; top: 100%; left: 0; right: 0; z-index: 20; list-style: none; padding: .35rem; margin: .25rem 0 0; background: var(--bg-secondary, #161b24); border: 1px solid var(--border); border-radius: .6rem; }
+.stock-suggestions li { padding: .5rem; cursor: pointer; display: flex; gap: .6rem; overflow-wrap: anywhere; }
+.stock-suggestions li[aria-selected="true"], .stock-suggestions li:hover { background: rgba(128,128,128,.2); }
+.chart-data-access { font-size: .8rem; margin: .6rem 0; }
+.chart-data-access p { color: var(--text-muted); margin: .4rem 0; }
+.chart-data-access input { width: min(100%, 24rem); display: block; }
+.chart-data-access output { display: block; margin: .35rem 0; }
+.chart-table-scroll { max-height: 18rem; overflow: auto; }
+.chart-table-scroll table { width: 100%; border-collapse: collapse; }
+.chart-table-scroll th, .chart-table-scroll td { padding: .35rem; text-align: left; }
+.chart-engine-error { padding: 1rem; }
+@media (max-width: 600px) {
+  .results, .panel, .t212-chart-section { min-width: 0; }
+  .chart-estimate-bar { padding: .5rem 0; }
+  .estimate-summary-text { flex-wrap: wrap; font-size: .8rem; }
+  .t212-chart-wrap, .t212-canvas-viewport { touch-action: pan-y; }
+  .stock-suggestions li { font-size: .8rem; }
+}

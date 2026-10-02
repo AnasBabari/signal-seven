@@ -51,6 +51,7 @@ export function getSharedEstimatePresentation({ forecast, history, currencySymbo
   if (Number(lastBar.c).toFixed(precision) !== Number(forecast.current_price).toFixed(precision)) {
     return unavailable('origin_mismatch', 'Origin price mismatch');
   }
+  if (history.dataFingerprint && forecast.provenance?.data_fingerprint && history.dataFingerprint !== forecast.provenance.data_fingerprint) return unavailable('origin_mismatch', 'Market data identity mismatch');
   const finalPrice = series[6];
   const changePct = (finalPrice / Number(forecast.current_price) - 1) * 100;
   if (!Number.isFinite(changePct)) return unavailable('invalid_bounds');

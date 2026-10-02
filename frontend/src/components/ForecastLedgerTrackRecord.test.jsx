@@ -106,9 +106,9 @@ describe('ForecastLedgerTrackRecord', () => {
     await waitFor(() => {
       expect(screen.queryByText(/Loading past forecasts/i)).not.toBeInTheDocument();
     });
-    expect(screen.getByText('Past price-movement forecasts')).toBeInTheDocument();
-    expect(screen.getByText('AAPL 5 market days')).toBeInTheDocument();
-    expect(screen.getAllByText('5 market days').length).toBeGreaterThan(0);
+    expect(screen.getByText('Recorded volatility forecasts')).toBeInTheDocument();
+    expect(screen.getByText('AAPL 5 trading sessions')).toBeInTheDocument();
+    expect(screen.getAllByText('5 trading sessions').length).toBeGreaterThan(0);
 
     // Headline live settlements KPI shows 1 scored live forecast
     expect(screen.getByText('1')).toBeInTheDocument();
@@ -165,7 +165,7 @@ describe('ForecastLedgerTrackRecord', () => {
     await act(async () => {
       finishOld({ ok: true, json: async () => mockLedgerResponse });
     });
-    expect(screen.getByText('MSFT 20 market days')).toBeInTheDocument();
+    expect(screen.getByText('MSFT 20 trading sessions')).toBeInTheDocument();
     expect(screen.queryByRole('table')).not.toBeInTheDocument();
   });
 });

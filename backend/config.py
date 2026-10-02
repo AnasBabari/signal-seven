@@ -122,9 +122,13 @@ class Settings(BaseSettings):
     # this only removes repeat training within one instance lifetime or
     # where the directory is genuinely persistent (local dev, Docker, paid).
     forecast_model_cache_dir: str | None = None
+    # Process-wide fitting capacity. Cache hits do not consume a training slot.
+    forecast_training_max_concurrency: int = Field(default=1, ge=1, le=4)
+    # Explicit opt-in; PostgreSQL advisory locks serialize fitting across workers.
+    # Local/ephemeral disk caches do not coordinate independent workers.
+    forecast_training_coordination_database_url: str | None = None
     # Warm the learned-forecast path in a background thread at startup. The
-    # first request in a fresh process otherwise pays a one-time PyTorch import
-    # plus model fitting (~9s measured), and the artifact cache key includes the
+    # first request in a fresh process otherwise pays model fitting, and the artifact cache key includes the
     # last data date, so that cost returns every trading day. Set
     # forecast_warmup_max_tickers=0 to disable.
     forecast_warmup_enabled: bool = True

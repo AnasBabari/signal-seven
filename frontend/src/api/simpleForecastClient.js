@@ -1,34 +1,6 @@
-function getApiBase() {
-  return (import.meta.env.VITE_API_URL || (typeof window !== 'undefined' ? window.STOCKLSTM_API_BASE : '') || '').replace(/\/$/, '');
-}
-
+import { getApiBase, requestJson, assertTickerIdentity, validatePriceResponse } from './request';
 const API_BASE = getApiBase();
-
-async function getJson(path, { signal, timeoutMs = 120_000 } = {}) {
-  const controller = new AbortController();
-  let timedOut = false;
-  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
-  const abort = () => controller.abort();
-  signal?.addEventListener('abort', abort, { once: true });
-  if (signal?.aborted) controller.abort();
-  try {
-    const base = getApiBase();
-    const response = await fetch(`${base}${path}`, { signal: controller.signal });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const error = new Error(payload?.detail || payload?.message || `Request failed (${response.status}).`);
-      error.status = response.status;
-      throw error;
-    }
-    return payload;
-  } catch (error) {
-    if (timedOut && !signal?.aborted) throw new DOMException("The request timed out. Please retry.", "TimeoutError");
-    throw error;
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener('abort', abort);
-  }
-}
+const getJson = requestJson;
 
 export async function wakeForecastService({ signal, onAttempt } = {}) {
   let lastError;
@@ -43,11 +15,14 @@ export async function wakeForecastService({ signal, onAttempt } = {}) {
       lastError = error;
     }
     await new Promise((resolve, reject) => {
-      const delay = setTimeout(resolve, Math.min(3_000 + attempt * 750, 10_000));
-      signal?.addEventListener('abort', () => {
+      const cleanResolve = () => { signal?.removeEventListener('abort', onAbort); resolve(); };
+      const delay = setTimeout(cleanResolve, Math.min(3_000 + attempt * 750, 10_000));
+      const onAbort = () => {
         clearTimeout(delay);
+        signal?.removeEventListener('abort', onAbort);
         reject(new DOMException('Aborted', 'AbortError'));
-      }, { once: true });
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
     });
   }
   throw lastError || new Error('The forecast service did not start in time.');
@@ -59,18 +34,18 @@ export async function fetchSimpleForecast(ticker, { signal } = {}) {
   if (!symbol) throw new Error('A stock ticker is required.');
   // Only the learned endpoint can supply a price estimate. A 404 is surfaced
   // to the UI, which retains history and offers a retry.
-  return getJson(`/api/v1/forecast?ticker=${encodeURIComponent(symbol)}&days=7`, { signal });
+  return validatePriceResponse(await getJson(`/api/v1/forecast?ticker=${encodeURIComponent(symbol)}&days=7`, { signal, timeoutMs: 120_000 }), symbol);
 }
 
 export async function fetchTickerNews(ticker, { signal } = {}) {
-  const symbol = String(ticker || 'MSFT').trim().toUpperCase();
+  const symbol = String(ticker || '').trim().toUpperCase();
   try {
     const res = await getJson(`/api/v1/news?ticker=${encodeURIComponent(symbol)}`, {
       signal,
       timeoutMs: 15_000,
     });
     if (Array.isArray(res?.items)) {
-      return res;
+      return assertTickerIdentity(res, symbol);
     }
   } catch (error) {
     if (signal?.aborted) throw error;

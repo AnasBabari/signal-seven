@@ -5,7 +5,7 @@ import { fetchPriceHistory } from '../api/priceHistoryClient';
  * Load full chart history for one ticker. Responses are cached per ticker
  * inside the client, so remounts and tab switches never refetch.
  */
-export function usePriceHistory(ticker) {
+export function usePriceHistory(ticker, refreshToken = 0) {
   const [history, setHistory] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -29,7 +29,7 @@ export function usePriceHistory(ticker) {
     setLoading(true);
     setError('');
     setMeta(null);
-    fetchPriceHistory(symbol, { signal: controller.signal })
+    fetchPriceHistory(symbol, { signal: controller.signal, forceRefresh: retryTick > 0 || refreshToken > 0 })
       .then((result) => {
         if (seqRef.current === id) {
           setHistory(result);
@@ -46,7 +46,7 @@ export function usePriceHistory(ticker) {
       })
       .finally(() => { if (seqRef.current === id && !controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [ticker, retryTick]);
+  }, [ticker, retryTick, refreshToken]);
 
   const retry = useCallback(() => {
     setRetryTick((tick) => tick + 1);

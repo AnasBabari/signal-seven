@@ -76,7 +76,9 @@ def test_simultaneous_forecasts_train_once_and_results_are_isolated(monkeypatch,
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(lambda _: sf.train_and_forecast("MSFT", frame, "ridge"), range(2)))
     assert len(calls) == 1
-    assert results[0] == results[1]
+    assert {k: v for k, v in results[0].items() if k != "timing"} == {
+        k: v for k, v in results[1].items() if k != "timing"
+    }
     results[0]["predicted_prices"][0] = -1
     assert sf.train_and_forecast("MSFT", frame, "ridge")["predicted_prices"][0] > 0
 
@@ -332,7 +334,10 @@ print(json.dumps(result, sort_keys=True))
         timeout=90,
         check=True,
     )
-    assert json.dumps(first, sort_keys=True) == run.stdout.strip()
+    cold = json.loads(run.stdout)
+    assert first.pop("timing")["cache_status"] == "trained"
+    assert cold.pop("timing")["cache_status"] == "artifact_hit"
+    assert first == cold
 
 
 def test_financial_sentiment_lexicon_scoring() -> None:

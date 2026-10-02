@@ -1,4 +1,4 @@
-"""Public endpoints for the simplified five-ticker forecasting product."""
+"""Public endpoints for the active US/UK forecasting product."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from data_pipeline import (
 from routes.common import limiter, validate_ticker
 from services.market_news import fetch_recent_news
 from services.simple_forecast import FORECAST_DAYS, SUPPORTED_TICKERS, train_and_forecast
+from services.training_budget import TrainingBusyError
 
 router = APIRouter(tags=["simple-forecast"])
 
@@ -58,14 +59,18 @@ def forecast(
             result = train_and_forecast(symbol, frame, model_name=model)
         train_ms = (time.perf_counter() - t_train) * 1000.0
         total_ms = (time.perf_counter() - route_started) * 1000.0
+        result = {
+            **result,
+            "timing": {**result.get("timing", {}), "data_ms": data_ms, "total_ms": total_ms},
+        }
         response = JSONResponse(content=result)
-        # Machine-readable totals; per-stage breakdown (features/select/
-        # infer, cache hit vs train) is logged server-side by
-        # train_and_forecast. No body fields change.
+        # Service body timings and request-level Server-Timing describe this invocation.
         response.headers["Server-Timing"] = (
             f"data;dur={data_ms:.0f}, train_or_cache;dur={train_ms:.0f}, total;dur={total_ms:.0f}"
         )
         return response
+    except TrainingBusyError as err:
+        raise HTTPException(status_code=503, detail=str(err), headers={"Retry-After": "3"}) from err
     except UnknownTickerError as err:
         raise HTTPException(status_code=404, detail="No market data is available.") from err
     except MarketTransportError as err:

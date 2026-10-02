@@ -79,7 +79,7 @@ function installFetch() {
       return Promise.resolve({ ok: true, json: () => Promise.resolve(volatilityBody(Number(match?.[1] || 5), sym, basePrice)) });
     }
     if (urlStr.includes('/api/v1/news')) {
-      return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'available', items: [] }) });
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'available', ticker: sym, items: [] }) });
     }
     return Promise.reject(new Error(`Unexpected fetch ${url}`));
   });
@@ -137,7 +137,7 @@ describe('simplified forecast app', () => {
 
   it('wakes the backend automatically from the single frontend page without fetching stock data on first visit', async () => {
     render(<App />);
-    expect(await screen.findByText('Forecast service ready')).toBeInTheDocument();
+    expect(await screen.findByText('Forecast service reachable')).toBeInTheDocument();
     expect(global.fetch).toHaveBeenCalledWith(expect.stringMatching(/\/health$/), expect.anything());
     // Critical requirement: Do not fetch any stock's history, forecast, or news before submission
     expect(global.fetch).not.toHaveBeenCalledWith(expect.stringMatching(/\/history/), expect.anything());
@@ -150,20 +150,20 @@ describe('simplified forecast app', () => {
     expect(screen.getByRole('heading', { name: /which stock would you like to explore\?/i })).toBeInTheDocument();
     const input = screen.getByLabelText(/stock ticker/i);
     expect(input).toHaveValue('');
-    expect(input).toHaveAttribute('placeholder', 'Enter a stock ticker');
+    expect(input).toHaveAttribute('placeholder', 'Enter a ticker or company name');
     const button = screen.getByRole('button', { name: /view outlook/i });
     expect(button).toBeDisabled();
     expect(container.querySelector('#chartContainer')).not.toBeInTheDocument();
     expect(container.querySelector('.t212-chart-skeleton')).not.toBeInTheDocument();
     expect(screen.queryByText(/Range midpoint — experimental:/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/recent .* headlines/i)).not.toBeInTheDocument();
-    await screen.findByText('Forecast service ready');
+    await screen.findByText('Forecast service reachable');
   });
 
   it('shows a learned seven-day result and chronological evidence in performance tab', async () => {
     const user = userEvent.setup();
     render(<App />);
-    await screen.findByText('Forecast service ready');
+    await screen.findByText('Forecast service reachable');
     const input = screen.getByLabelText(/stock ticker/i);
     await user.type(input, 'MSFT');
     await user.click(screen.getByRole('button', { name: /view outlook/i }));
@@ -186,7 +186,7 @@ describe('simplified forecast app', () => {
 
   it('offers one ticker input without exchange tabs or ticker grids', async () => {
     render(<App />);
-    expect(screen.getAllByRole('textbox')).toHaveLength(1);
+    expect(screen.getAllByRole('combobox')).toHaveLength(1);
     expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Ticker selection matrix')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Quick ticker switcher')).not.toBeInTheDocument();
@@ -194,13 +194,13 @@ describe('simplified forecast app', () => {
     expect(screen.getByText('Stock forecasts made simple')).toBeInTheDocument();
     expect(screen.queryByText(/A ticker is a stock's short code/)).not.toBeInTheDocument();
     expect(screen.queryByText(/PostgreSQL|70\/15\/15|Quantitative Terminal|causal market/i)).not.toBeInTheDocument();
-    await screen.findByText('Forecast service ready');
+    await screen.findByText('Forecast service reachable');
   });
 
   it('renders the volatility outlook card in Overview tab without model codenames', async () => {
     const user = userEvent.setup();
     render(<App />);
-    await screen.findByText('Forecast service ready');
+    await screen.findByText('Forecast service reachable');
     const input = screen.getByLabelText(/stock ticker/i);
     await user.type(input, 'MSFT');
     await user.click(screen.getByRole('button', { name: /view outlook/i }));
@@ -215,7 +215,7 @@ describe('simplified forecast app', () => {
   it.each(['nvda', 'jpm', 'shel.l'])('submits the typed ticker %s with Enter', async (symbol) => {
     const user = userEvent.setup();
     render(<App />);
-    await screen.findByText('Forecast service ready');
+    await screen.findByText('Forecast service reachable');
     const input = screen.getByLabelText(/stock ticker/i);
     await user.clear(input);
     await user.type(input, `${symbol}{Enter}`);
@@ -242,6 +242,7 @@ describe('simplified forecast app', () => {
 
   it('renders institutional news in News tab with simple list, source, and links', async () => {
     const mockNews = {
+      ticker: 'MSFT',
       status: 'available',
       provider: 'yahoo',
       items: [
@@ -285,7 +286,7 @@ describe('simplified forecast app', () => {
 
     const user = userEvent.setup();
     render(<App />);
-    await screen.findByText('Forecast service ready');
+    await screen.findByText('Forecast service reachable');
     const input = screen.getByLabelText(/stock ticker/i);
     await user.type(input, 'MSFT');
     await user.click(screen.getByRole('button', { name: /view outlook/i }));
@@ -308,7 +309,7 @@ describe('simplified forecast app', () => {
   it('separates typing from submitted stock and does not trigger requests or change results on typing', async () => {
     const user = userEvent.setup();
     render(<App />);
-    await screen.findByText('Forecast service ready');
+    await screen.findByText('Forecast service reachable');
     const input = screen.getByLabelText(/stock ticker/i);
     await user.type(input, 'MSFT');
     await user.click(screen.getByRole('button', { name: /view outlook/i }));
@@ -348,14 +349,14 @@ describe('simplified forecast app', () => {
         });
       }
       if (String(url).includes('/api/v1/news')) {
-        return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'available', items: [] }) });
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'available', ticker: 'MSFT', items: [] }) });
       }
       return Promise.reject(new Error(`Unexpected fetch ${url}`));
     });
 
     const user = userEvent.setup();
     render(<App />);
-    await screen.findByText('Forecast service ready');
+    await screen.findByText('Forecast service reachable');
     const input = screen.getByLabelText(/stock ticker/i);
     await user.type(input, 'MSFT');
     await user.click(screen.getByRole('button', { name: /view outlook/i }));
@@ -363,7 +364,7 @@ describe('simplified forecast app', () => {
     // History succeeded, so chart should be revealed!
     expect(await screen.findByLabelText(/MSFT price chart/i)).toBeInTheDocument();
     // Forecast failed, so actionable forecast error should be shown!
-    expect(await screen.findByRole('alert')).toHaveTextContent(/could not be completed|server error/i);
+    await waitFor(() => expect(screen.getAllByRole('alert').some((item) => /could not be completed|server error/i.test(item.textContent))).toBe(true));
     expect(screen.getByRole('button', { name: /retry forecast/i })).toBeInTheDocument();
   });
 
@@ -387,14 +388,14 @@ describe('simplified forecast app', () => {
         });
       }
       if (String(url).includes('/api/v1/news')) {
-        return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'available', items: [] }) });
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'available', ticker: 'MSFT', items: [] }) });
       }
       return Promise.reject(new Error(`Unexpected fetch ${url}`));
     });
 
     const user = userEvent.setup();
     const { container } = render(<App />);
-    await screen.findByText('Forecast service ready');
+    await screen.findByText('Forecast service reachable');
     const input = screen.getByLabelText(/stock ticker/i);
     await user.type(input, 'MSFT');
     await user.click(screen.getByRole('button', { name: /view outlook/i }));
@@ -402,8 +403,7 @@ describe('simplified forecast app', () => {
     // Chart container must NOT be mounted
     expect(container.querySelector('#chartContainer')).not.toBeInTheDocument();
     // Compact error with retry must appear
-    const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent(/upstream provider down|price history is unavailable/i);
+    await waitFor(() => expect(screen.getAllByRole('alert').some((item) => /upstream provider down|price history is unavailable/i.test(item.textContent))).toBe(true));
     expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
   });
 
@@ -438,14 +438,14 @@ describe('simplified forecast app', () => {
         return Promise.resolve({ ok: true, json: () => Promise.resolve(volatilityBody(5)) });
       }
       if (String(url).includes('/api/v1/news')) {
-        return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'available', items: [] }) });
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'available', ticker: 'MSFT', items: [] }) });
       }
       return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
     });
 
     const user = userEvent.setup();
     render(<App />);
-    await screen.findByText('Forecast service ready');
+    await screen.findByText('Forecast service reachable');
     const input = screen.getByLabelText(/stock ticker/i);
 
     // Submit NVDA first
@@ -496,14 +496,14 @@ describe('simplified forecast app', () => {
         return Promise.resolve({ ok: true, json: () => Promise.resolve(forecast) });
       }
       if (String(url).includes('/api/v1/news')) {
-        return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'available', items: [] }) });
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'available', ticker: 'MSFT', items: [] }) });
       }
       return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
     });
 
     const user = userEvent.setup();
     render(<App />);
-    await screen.findByText('Forecast service ready');
+    await screen.findByText('Forecast service reachable');
     const input = screen.getByLabelText(/stock ticker/i);
     await user.type(input, 'MSFT');
     await user.click(screen.getByRole('button', { name: /view outlook/i }));
@@ -544,26 +544,22 @@ describe('simplified forecast app', () => {
         return Promise.resolve({ ok: true, json: () => Promise.resolve(incompleteForecast) });
       }
       if (String(url).includes('/api/v1/news')) {
-        return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'available', items: [] }) });
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'available', ticker: 'MSFT', items: [] }) });
       }
       return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
     });
 
     const user = userEvent.setup();
     render(<App />);
-    await screen.findByText('Forecast service ready');
+    await screen.findByText('Forecast service reachable');
     const input = screen.getByLabelText(/stock ticker/i);
     await user.type(input, 'MSFT');
     await user.click(screen.getByRole('button', { name: /view outlook/i }));
 
-    // Switch to Performance tab to see backtest metrics
-    const perfTab = await screen.findByRole('tab', { name: /performance/i });
-    await user.click(perfTab);
-
-    expect(await screen.findByText('Price Model Historical Performance')).toBeInTheDocument();
-    const dashes = screen.getAllByText('—');
-    expect(dashes.length).toBeGreaterThanOrEqual(4);
+    await waitFor(() => expect(screen.getAllByRole('alert').some((item) => /invalid origin/i.test(item.textContent))).toBe(true));
+    expect(screen.queryByRole('tab', { name: /performance/i })).toBeNull();
     expect(screen.queryByText('$0.00')).not.toBeInTheDocument();
+    expect(screen.queryByText(/will appear when/i)).not.toBeInTheDocument();
   });
 
   it('formats UK stock prices with pence suffix p instead of prefix', async () => {
@@ -586,14 +582,14 @@ describe('simplified forecast app', () => {
         return Promise.resolve({ ok: true, json: () => Promise.resolve(ukForecast) });
       }
       if (String(url).includes('/api/v1/news')) {
-        return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'available', items: [] }) });
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'available', ticker: 'MSFT', items: [] }) });
       }
       return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
     });
 
     const user = userEvent.setup();
     render(<App />);
-    await screen.findByText('Forecast service ready');
+    await screen.findByText('Forecast service reachable');
     const input = screen.getByLabelText(/stock ticker/i);
     await user.type(input, 'SHEL.L');
     await user.click(screen.getByRole('button', { name: /view outlook/i }));
@@ -606,7 +602,7 @@ describe('simplified forecast app', () => {
   it('supports expanded chart mode and closes with Escape key', async () => {
     const user = userEvent.setup();
     render(<App />);
-    await screen.findByText('Forecast service ready');
+    await screen.findByText('Forecast service reachable');
     const input = screen.getByLabelText(/stock ticker/i);
     await user.type(input, 'MSFT');
     await user.click(screen.getByRole('button', { name: /view outlook/i }));

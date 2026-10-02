@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
 import threading
 from typing import Any
 
@@ -117,17 +116,22 @@ def search(
 
     yf = getattr(api, "yf", default_yf)
 
+    from services.simple_forecast import SUPPORTED_TICKERS, get_ticker_meta
+
     exact_symbol = query.strip().upper()
+    local = [
+        {"ticker": ticker, "name": get_ticker_meta(ticker)["name"], "type": "EQUITY"}
+        for ticker in SUPPORTED_TICKERS
+        if exact_symbol in ticker or exact_symbol in get_ticker_meta(ticker)["name"].upper()
+    ]
+    if local:
+        return {"results": sorted(local, key=lambda item: item["ticker"] != exact_symbol)[:8]}
     fallback = []
-    if re.fullmatch(r"[A-Z0-9.\-]{1,12}", exact_symbol):
-        fallback.append({"ticker": exact_symbol, "name": exact_symbol, "type": "SYMBOL"})
-    if fallback and query.strip() == exact_symbol:
-        return {"results": fallback}
     try:
         results = yf.Search(query, max_results=8)
         suggestions = []
         for r in results.quotes:
-            if r.get("quoteType") in ("EQUITY", "ETF"):
+            if r.get("quoteType") in ("EQUITY", "ETF") and r.get("symbol") in SUPPORTED_TICKERS:
                 suggestions.append(
                     {
                         "ticker": r.get("symbol", ""),

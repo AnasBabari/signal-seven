@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { fetchSimpleForecast, fetchTickerNews, wakeForecastService } from './api/simpleForecastClient';
-import { fetchPriceHistory } from './api/priceHistoryClient';
+import { clearPriceHistoryCache, fetchPriceHistory } from './api/priceHistoryClient';
+import { assertTickerIdentity, assertMarketIdentity } from './api/request';
+import StockAutocomplete from './components/StockAutocomplete';
 import PriceChart from './components/PriceChart';
 import VolatilityOutlook from './components/VolatilityOutlook';
 import ForecastLedgerTrackRecord from './components/ForecastLedgerTrackRecord';
@@ -23,7 +25,7 @@ function formatPercent(value, digits = 1) {
 function ServiceBadge({ status, attempt }) {
   const copy = {
     checking: `Starting forecast service${attempt > 1 ? ` · attempt ${attempt}` : ''}…`,
-    online: 'Forecast service ready',
+    online: 'Forecast service reachable',
     offline: 'Forecast service unavailable',
   }[status];
   return (
@@ -238,6 +240,8 @@ export default function App() {
   const [inputError, setInputError] = useState('');
   const [historyError, setHistoryError] = useState('');
   const [forecastError, setForecastError] = useState('');
+  const [refreshToken, setRefreshToken] = useState(0);
+  const [marketHistory, setMarketHistory] = useState(null);
   const [perf, setPerf] = useState(null);
 
   const wakeController = useRef(null);
@@ -300,6 +304,9 @@ export default function App() {
       return;
     }
 
+    clearPriceHistoryCache();
+    setRefreshToken((value) => value + 1);
+    setMarketHistory(null);
     setInputError('');
     setHistoryError('');
     setForecastError('');
@@ -330,6 +337,8 @@ export default function App() {
     const historyPromise = fetchPriceHistory(symbol, { signal: controller.signal })
       .then((historyResult) => {
         if (requestSeq.current !== seq) return null;
+        assertTickerIdentity(historyResult, symbol);
+        setMarketHistory(historyResult);
         if (Array.isArray(historyResult?.daily) && historyResult.daily.length > 0) {
           historyUsable = true;
           setChartTicker(symbol);
@@ -354,6 +363,7 @@ export default function App() {
       const forecastT0 = nowMs();
       const forecastValue = await fetchSimpleForecast(symbol, { signal: controller.signal });
       if (requestSeq.current !== seq) return null;
+      assertTickerIdentity(forecastValue, symbol);
       setForecast(forecastValue);
       setPerf((prev) => ({ ...(prev || {}), forecastMs: Math.round(nowMs() - forecastT0) }));
 
@@ -384,6 +394,7 @@ export default function App() {
     const newsPromise = fetchTickerNews(symbol, { signal: controller.signal })
       .then((newsResult) => {
         if (requestSeq.current !== seq) return null;
+        assertTickerIdentity(newsResult, symbol);
         setNews(newsResult);
         return newsResult;
       })
@@ -405,6 +416,10 @@ export default function App() {
       setHistoryError(histErr || 'Price history is unavailable for this stock right now.');
     }
   }, [inputTicker, nowMs, serviceStatus, chartTicker]);
+
+  let identityError = '';
+  try { if (forecast && marketHistory) assertMarketIdentity(forecast, marketHistory); }
+  catch (error) { identityError = error.message; }
 
   return (
     <div className="app-shell">
@@ -438,21 +453,9 @@ export default function App() {
             <div className="search-input-row">
               <div className="input-field-group">
                 <label htmlFor="tickerInput" className="sr-only">Stock ticker</label>
-                <input
-                  id="tickerInput"
-                  aria-label="Stock ticker"
-                  value={inputTicker}
-                  onChange={(event) => {
-                    setInputTicker(event.target.value.toUpperCase());
-                    if (inputError) setInputError('');
-                  }}
-                  placeholder="Enter a stock ticker"
-                  maxLength={15}
-                  autoComplete="off"
-                  spellCheck="false"
-                  aria-invalid={Boolean(inputError)}
-                  aria-describedby={inputError ? 'symbolError' : undefined}
-                />
+                <StockAutocomplete value={inputTicker}
+                  onChange={(value) => { setInputTicker(value); if (inputError) setInputError(''); }}
+                  onSelect={(symbol) => runForecast(symbol)} invalid={Boolean(inputError)} errorId={inputError ? 'symbolError' : undefined} />
                 {inputError && (
                   <span id="symbolError" className="symbol-feedback" role="alert">
                     {inputError}
@@ -495,23 +498,6 @@ export default function App() {
           )}
         </section>
 
-        {/* Results Workspace */}
-        {chartTicker && (
-          <div className="results">
-            {/* Centerpiece Interactive Price Chart */}
-            <PriceChart
-              ticker={chartTicker}
-              currencySymbol={
-                forecast?.ticker === chartTicker && forecast?.currency_symbol
-                  ? forecast.currency_symbol
-                  : (chartTicker.endsWith('.L') ? 'p' : '$')
-              }
-              forecast={forecast?.ticker === chartTicker ? forecast : null}
-              companyName={forecast?.ticker === chartTicker ? forecast.ticker_name : null}
-              onHistorySettled={handleHistorySettled}
-              onRetryForecast={() => runForecast(submittedTicker)}
-            />
-
             {forecastError && !loading && (
               <div className="actionable-forecast-error" role="alert">
                 <span>{forecastError}</span>
@@ -524,6 +510,24 @@ export default function App() {
                 </button>
               </div>
             )}
+
+        {/* Results Workspace */}
+        {chartTicker && (
+          <div className="results">
+            {/* Centerpiece Interactive Price Chart */}
+            <PriceChart
+              ticker={chartTicker}
+              refreshToken={refreshToken}
+              currencySymbol={
+                forecast?.ticker === chartTicker && forecast?.currency_symbol
+                  ? forecast.currency_symbol
+                  : (chartTicker.endsWith('.L') ? 'p' : '$')
+              }
+              forecast={forecast?.ticker === chartTicker ? forecast : null}
+              companyName={forecast?.ticker === chartTicker ? forecast.ticker_name : null}
+              onHistorySettled={handleHistorySettled}
+              onRetryForecast={() => runForecast(submittedTicker)}
+            />
 
             {/* Supporting Information Behind Overview / News / Performance Tabs */}
             <div className="supporting-tabs-container">
@@ -580,6 +584,8 @@ export default function App() {
               {activeTab === 'overview' && (
                 <div id="panel-overview" role="tabpanel" aria-labelledby="tab-overview">
                   <VolatilityOutlook
+                    refreshToken={refreshToken}
+                    expectedIdentity={marketHistory || forecast}
                     ticker={chartTicker}
                     currencySymbol={
                       forecast?.ticker === chartTicker && forecast?.currency_symbol
@@ -603,11 +609,11 @@ export default function App() {
 
               {activeTab === 'performance' && (
                 <div id="panel-performance" role="tabpanel" aria-labelledby="tab-performance">
-                  {forecast?.backtest ? (
+                  {forecast?.backtest && !identityError ? (
                     <BacktestPanel backtest={forecast.backtest} />
                   ) : (
                     <div className="panel empty-performance-panel">
-                      <p className="empty-copy">{loading ? 'Loading price evidence…' : 'Price evaluation is unavailable for this forecast. Retry the forecast to try again.'}</p>
+                      <p className="empty-copy">{identityError || (loading ? 'Loading price evidence…' : 'Price evaluation is unavailable for this forecast. Retry the forecast to try again.')}</p>
                     </div>
                   )}
 

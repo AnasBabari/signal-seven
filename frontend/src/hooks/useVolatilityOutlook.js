@@ -1,85 +1,52 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { fetchVolatilityForecast } from '../ml/volatilityClient';
-
+import { withDeadline, sessionCacheKey, assertMarketIdentity } from '../api/request';
 export const OUTLOOK_HORIZONS = [5, 10, 20];
 const outlookCache = new Map();
+export function clearVolatilityOutlookCache() { outlookCache.clear(); }
 
-export function clearVolatilityOutlookCache() {
-  outlookCache.clear();
-}
-
-/**
- * Volatility outlook for one ticker (model=auto, horizons
- * 5/10/20 fetched in parallel). Cached per ticker for the page lifetime.
- * A failed horizon resolves to null so one bad response never blocks the
- * other two; the card renders whatever arrived.
- */
-export function useVolatilityOutlook(ticker) {
+export function useVolatilityOutlook(ticker, { refreshToken = 0, expectedIdentity = null } = {}) {
   const [outlook, setOutlook] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [retryTick, setRetryTick] = useState(0);
   const seqRef = useRef(0);
-
+  const expectedRef = useRef(expectedIdentity);
+  expectedRef.current = expectedIdentity;
+  const expectedDate = expectedIdentity?.data_as_of || expectedIdentity?.asOf || '';
+  const expectedFingerprint = expectedIdentity?.provenance?.data_fingerprint || expectedIdentity?.dataFingerprint || '';
   useEffect(() => {
     const symbol = String(ticker || '').trim().toUpperCase();
-    if (!symbol) {
-      setOutlook(null);
-      setLoading(false);
-      setError('');
-      return undefined;
-    }
-    const id = seqRef.current + 1;
-    seqRef.current = id;
-    const cached = outlookCache.get(symbol);
-    if (cached) {
-      setOutlook(cached);
-      setLoading(false);
-      setError('');
-      return undefined;
-    }
+    const id = ++seqRef.current;
+    if (!symbol) { setOutlook(null); setLoading(false); setError(''); return undefined; }
+    const key = `${sessionCacheKey(symbol)}:${expectedDate}:${expectedFingerprint}`;
+    const cached = outlookCache.get(key);
+    const fresh = cached && Date.now() - cached.at < 60_000;
+    const byHorizon = fresh && (!refreshToken || retryTick > 0) ? { ...cached.value.byHorizon } : {};
+    const horizons = OUTLOOK_HORIZONS.filter((horizon) => !byHorizon[horizon]);
     const controller = new AbortController();
-    setOutlook(null);
-    setLoading(true);
-    setError('');
-    Promise.all(OUTLOOK_HORIZONS.map(async (horizon) => {
-      try {
-        const result = await fetchVolatilityForecast(symbol, horizon, controller.signal, { model: 'auto' });
-        return [horizon, result];
-      } catch (err) {
-        if (err?.name === 'AbortError') throw err;
-        return [horizon, null];
+    let pending = horizons.length;
+    const publish = () => {
+      if (seqRef.current !== id || controller.signal.aborted) return;
+      const hasSuccess = Object.keys(byHorizon).length > 0;
+      const value = { ticker: symbol, byHorizon: { ...byHorizon }, pendingHorizons: horizons.filter((h) => !byHorizon[h]) };
+      setOutlook(hasSuccess ? value : null);
+      setLoading(pending > 0);
+      setError(pending === 0 && !hasSuccess ? 'Volatility outlook is unavailable right now.' : '');
+      if (hasSuccess) {
+        outlookCache.set(key, { at: Date.now(), value });
+        while (outlookCache.size > 64) outlookCache.delete(outlookCache.keys().next().value);
       }
-    }))
-      .then((entries) => {
-        if (seqRef.current !== id || controller.signal.aborted) return;
-        const byHorizon = Object.fromEntries(entries);
-        const loaded = OUTLOOK_HORIZONS.filter((horizon) => byHorizon[horizon]);
-        if (loaded.length === 0) {
-          setOutlook(null);
-          setLoading(false);
-          setError('Volatility outlook is unavailable right now.');
-          return;
-        }
-        const value = { ticker: symbol, byHorizon };
-        outlookCache.set(symbol, value);
-        setOutlook(value);
-        setLoading(false);
-      })
-      .catch((err) => {
-        if (seqRef.current === id && !controller.signal.aborted && err?.name !== 'AbortError') {
-          setOutlook(null);
-          setLoading(false);
-          setError(err?.message || 'Volatility outlook is unavailable right now.');
-        }
-      });
+    };
+    publish();
+    horizons.forEach((horizon) => {
+      withDeadline((signal) => fetchVolatilityForecast(symbol, horizon, signal, { model: 'auto' }), { signal: controller.signal, timeoutMs: 20_000 })
+        .then((result) => { assertMarketIdentity(result, expectedRef.current); byHorizon[horizon] = result; })
+        .catch(() => {})
+        .finally(() => { pending -= 1; publish(); });
+    });
     return () => controller.abort();
-  }, [ticker, retryTick]);
-
-  const retry = useCallback(() => {
-    outlookCache.delete(String(ticker || '').trim().toUpperCase());
-    setRetryTick((tick) => tick + 1);
-  }, [ticker]);
-
+  }, [ticker, retryTick, refreshToken, expectedDate, expectedFingerprint]);
+  const retry = useCallback(() => setRetryTick((tick) => tick + 1), []);
   return { outlook, loading, error, retry };
 }

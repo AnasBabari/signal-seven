@@ -129,7 +129,7 @@ def test_models_advertises_train_free_active_contract():
     assert active["public_forecast_mode"] == "read_only_preview"
     assert active["live_collection_endpoint"] == "/api/v1/volatility/collect"
     assert active["live_collection_authentication"] == "bearer_token_required"
-    assert active["metric_source"] == "baseline_definition"
+    assert active["metric_source"] == "response_evidence_per_selected_model"
     assert body["model_storage"]["required"] is False
 
 

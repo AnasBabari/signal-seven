@@ -153,9 +153,13 @@ export default function PriceChart({
   companyName = null,
   onHistorySettled = null,
   onRetryForecast = null,
+  refreshToken = 0,
 }) {
   const isDark = useAppTheme();
-  const { history, loading, error, meta, retry } = usePriceHistory(ticker);
+  const { history, loading, error, meta, retry } = usePriceHistory(ticker, refreshToken);
+  const descriptionId = React.useId();
+  const [tableOpen, setTableOpen] = useState(false);
+  const [inspectIndex, setInspectIndex] = useState(0);
   const [rangeId, setRangeId] = useState(null);
   const [view, setView] = useState(null);
   const [showForecast, setShowForecast] = useState(true);
@@ -295,7 +299,7 @@ export default function PriceChart({
   }, [isDark, stats.up]);
 
   const chartData = useMemo(() => {
-    const labels = [...points.labels.map((label) => formatAxisLabel(label, points.isIntraday))];
+    const labels = [...points.labels];
     const historyPadded = [...points.prices];
     const datasets = [];
 
@@ -326,13 +330,13 @@ export default function PriceChart({
     if (canShowForecastOverlay && estimate?.series?.length > 0) {
       estimate.futureDates.forEach((futureDate) => {
         historyPadded.push(null);
-        labels.push(formatAxisLabel(futureDate, false));
+        labels.push(futureDate);
       });
 
       forecastSplitIndex = points.prices.length - 1;
 
       datasets.push({
-        label: '7-day estimate',
+        label: 'Range midpoint — experimental',
         data: padForecast(estimate.series, points.prices.length),
         borderColor: colors.estimate,
         backgroundColor: 'transparent',
@@ -590,7 +594,7 @@ export default function PriceChart({
                 </span>
               )}
               <span className="t212-range-name">
-                {activeRange === 'MAX' ? 'Available history' : activeRange}
+                {activeRange === 'MAX' ? `Available history · ${points.labels[0]}–${points.labels.at(-1)}` : activeRange}
               </span>
               {dataDate && !points.isIntraday && (
                 <span className="t212-data-date" title={`Market data through ${dataDate}`}>
@@ -605,13 +609,12 @@ export default function PriceChart({
 
         {/* Restrained Toolbar */}
         <div className="t212-restrained-toolbar">
-          <div className="t212-range-tabs" role="tablist" aria-label="Chart time range">
+          <div className="t212-range-tabs" role="group" aria-label="Chart time range">
             {CHART_RANGES.filter((range) => available.includes(range.id)).map((range) => (
               <button
                 key={range.id}
                 type="button"
-                role="tab"
-                aria-selected={activeRange === range.id}
+                aria-pressed={activeRange === range.id}
                 className={`range-pill ${activeRange === range.id ? 'active' : ''}`}
                 onClick={() => selectRange(range.id)}
               >
@@ -621,18 +624,18 @@ export default function PriceChart({
           </div>
 
           <div className="t212-toolbar-actions">
-            {/* 7-day estimate toggle */}
+            {/* 7-session midpoint toggle */}
             <div className="estimate-toggle-wrapper">
               <button
                 type="button"
                 className={`toolbar-btn estimate-toggle-btn ${showForecast && !isIntradayRange ? 'active' : ''}`}
                 disabled={isIntradayRange}
                 onClick={() => setShowForecast((prev) => !prev)}
-                title={isIntradayRange ? '7-day estimate is hidden on 24H intraday range' : 'Toggle 7-day estimate line'}
+                title={isIntradayRange ? '7-session midpoint is hidden on 24H intraday range' : 'Toggle 7-session midpoint line'}
                 aria-pressed={showForecast && !isIntradayRange}
               >
                 <span className="estimate-indicator-dash" aria-hidden="true" />
-                7-day estimate
+                7-session midpoint
               </button>
               {isIntradayRange && (
                 <span className="intraday-estimate-note">Hidden for 24H</span>
@@ -665,6 +668,41 @@ export default function PriceChart({
           </div>
         </div>
       </div>
+
+      {/* In-Chart Forecast Summary Line or Mismatch Alert */}
+      {estimate?.isAvailable && (
+        <div className="chart-estimate-bar">
+          <div className="estimate-summary-text">
+            <span className="estimate-dot" aria-hidden="true" />
+            <span>
+              <strong>Range midpoint — experimental:</strong> {formatMoneyLocal(estimate.finalPrice, currencySymbol)} ·{' '}
+              <span className={`estimate-delta ${estimate.direction}`}>
+                {estimate.changePct != null && Number.isFinite(estimate.changePct)
+                  ? `${estimate.changePct > 0 ? '+' : ''}${estimate.changePct.toFixed(1)}%`
+                  : '—'}
+              </span>{' '}
+              from the latest close. After 7 trading sessions · {estimate.futureDates.at(-1)}
+            </span>
+            <button
+              type="button"
+              className="info-icon-btn"
+              onClick={() => setShowEstimateInfo((prev) => !prev)}
+              aria-label="How this estimate works"
+              title="How this estimate works"
+            >
+              ℹ
+            </button>
+          </div>
+
+          {showEstimateInfo && (
+            <p className="estimate-inline-explanation">
+              The displayed midpoint averages the two historical error bounds. It has not been separately evaluated.
+              {estimate.pointEstimate != null ? ` The model point forecast is ${formatMoneyLocal(estimate.pointEstimate, currencySymbol)}.` : ' The model point forecast is unavailable.'}
+              {' '}The bounds are historical error bands; their coverage for this refit is unverified.
+            </p>
+          )}
+        </div>
+      )}
 
       {/* Chart Canvas Wrap */}
       <div
@@ -711,6 +749,9 @@ export default function PriceChart({
           <React.Suspense fallback={<div className="loading-text">Loading Chart…</div>}>
             <LazyLineChart
               ref={chartRef}
+              role="img"
+              aria-label={`${ticker} historical closes and experimental range midpoint`}
+              aria-describedby={descriptionId}
               data={chartData}
               options={chartOptions}
               plugins={[crosshairPlugin, lastPricePlugin, forecastRegionPlugin]}
@@ -724,40 +765,29 @@ export default function PriceChart({
         </div>
       </div>
 
-      {/* In-Chart Forecast Summary Line or Mismatch Alert */}
-      {estimate?.isAvailable && (
-        <div className="chart-estimate-bar">
-          <div className="estimate-summary-text">
-            <span className="estimate-dot" aria-hidden="true" />
-            <span>
-              <strong>Range midpoint — experimental:</strong> {formatMoneyLocal(estimate.finalPrice, currencySymbol)} ·{' '}
-              <span className={`estimate-delta ${estimate.direction}`}>
-                {estimate.changePct != null && Number.isFinite(estimate.changePct)
-                  ? `${estimate.changePct > 0 ? '+' : ''}${estimate.changePct.toFixed(1)}%`
-                  : '—'}
-              </span>{' '}
-              from the latest close. After 7 trading sessions · {estimate.futureDates.at(-1)}
-            </span>
-            <button
-              type="button"
-              className="info-icon-btn"
-              onClick={() => setShowEstimateInfo((prev) => !prev)}
-              aria-label="How this estimate works"
-              title="How this estimate works"
-            >
-              ℹ
-            </button>
+      {hasData && <div className="chart-data-access">
+        <p id={descriptionId}>Solid line: recorded historical closes. Dashed line: experimental range midpoint after seven trading sessions. Use the date inspector or table to read values.</p>
+        <label htmlFor={`${descriptionId}-inspect`}>Inspect chart date</label>
+        <input id={`${descriptionId}-inspect`} type="range" min="0" max={Math.max(0, chartData.labels.length - 1)} value={Math.min(inspectIndex, chartData.labels.length - 1)}
+          onChange={(event) => setInspectIndex(Number(event.target.value))}
+          onKeyDown={(event) => {
+            const movements = { ArrowLeft: -1, ArrowRight: 1, ArrowDown: -1, ArrowUp: 1 };
+            if (event.key in movements || ['Home', 'End'].includes(event.key)) {
+              event.preventDefault();
+              setInspectIndex((current) => event.key === 'Home' ? 0 : event.key === 'End' ? chartData.labels.length - 1 : Math.max(0, Math.min(chartData.labels.length - 1, current + movements[event.key])));
+            }
+          }} />
+        <output aria-live="polite">{chartData.labels[Math.min(inspectIndex, chartData.labels.length - 1)]} · Historical close {formatMoneyLocal(chartData.datasets[0]?.data[Math.min(inspectIndex, chartData.labels.length - 1)], currencySymbol)} · Range midpoint {formatMoneyLocal(chartData.datasets[1]?.data[Math.min(inspectIndex, chartData.labels.length - 1)], currencySymbol)}</output>
+        <details onToggle={(event) => setTableOpen(event.currentTarget.open)}>
+          <summary tabIndex="0">Price data table</summary>
+          <div className="chart-table-scroll" tabIndex="0">
+            <table><caption>{ticker} prices and experimental midpoint</caption>
+              <thead><tr><th scope="col">Date</th><th scope="col">Historical close</th><th scope="col">Range midpoint</th></tr></thead>
+              <tbody>{tableOpen && chartData.labels.map((date, index) => <tr key={`${date}-${index}`}><th scope="row">{date}</th><td>{formatMoneyLocal(chartData.datasets[0]?.data[index], currencySymbol)}</td><td>{formatMoneyLocal(chartData.datasets[1]?.data[index], currencySymbol)}</td></tr>)}</tbody>
+            </table>
           </div>
-
-          {showEstimateInfo && (
-            <p className="estimate-inline-explanation">
-              The displayed midpoint averages the two historical error bounds. It has not been separately evaluated.
-              {estimate.pointEstimate != null ? ` The model point forecast is ${formatMoneyLocal(estimate.pointEstimate, currencySymbol)}.` : ' The model point forecast is unavailable.'}
-              {' '}The bounds are historical error bands; their coverage for this refit is unverified.
-            </p>
-          )}
-        </div>
-      )}
+        </details>
+      </div>}
 
       {estimate?.isMismatch && (
         <div className="chart-mismatch-alert" role="alert">

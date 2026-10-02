@@ -61,24 +61,14 @@ export default function VolatilityOutlook({
   ticker,
   currencySymbol = '$',
   currentPrice = null,
-  priceEstimate = null,
+  refreshToken = 0,
+  expectedIdentity = null,
 }) {
-  const { outlook, loading, error, retry } = useVolatilityOutlook(ticker);
+  const { outlook, loading, error, retry } = useVolatilityOutlook(ticker, { refreshToken, expectedIdentity });
   const symbol = String(ticker || '').toUpperCase();
   if (!symbol) return null;
 
-  const combined = (() => {
-    const five = outlook?.byHorizon?.[5];
-    const annual = five ? annualisedFromResponse(five) : null;
-    if (!priceEstimate || priceEstimate.price == null || !Number.isFinite(Number(priceEstimate.price)) || !annual || currentPrice == null || !Number.isFinite(Number(currentPrice))) {
-      return null;
-    }
-    const band = expectedRange(currentPrice, annual, 5);
-    if (!band) return null;
-    return { ...band, annual, changePct: Number(priceEstimate.changePct) };
-  })();
-
-  if (loading) {
+  if (loading && !outlook) {
     return (
       <div className="volatility-status-row" role="status">
         <span className="loading-dot" aria-hidden="true" />
@@ -170,7 +160,7 @@ export default function VolatilityOutlook({
                       </strong>
                     </div>
                   )}
-                  {!combined && range && (
+                  {range && (
                     <div className="detail-item">
                       <span>Expected price range (±1σ):</span>
                       <strong className="mono">
@@ -190,34 +180,8 @@ export default function VolatilityOutlook({
       </div>
       {missingHorizons.length > 0 && (
         <div className="volatility-status-row" role="status">
-          <span>{missingHorizons.join(', ')}-session outlook unavailable. Other periods are shown above.</span>
+          <span>{missingHorizons.join(', ')}-session outlook {loading ? 'loading' : 'unavailable'}. Other periods are shown above.</span>
           <button type="button" className="retry-action-btn" onClick={retry}>Retry missing periods</button>
-        </div>
-      )}
-
-      {combined && (
-        <div className="combined-outlook" aria-label="Combined seven-day outlook">
-          <h3>7-Day Outlook</h3>
-          <dl>
-            <div>
-              <dt>Estimated price</dt>
-              <dd className="mono">{money(priceEstimate.price, currencySymbol)}</dd>
-            </div>
-            <div>
-              <dt>Model direction</dt>
-              <dd className={`mono ${combined.changePct >= 0 ? 'up' : 'down'}`}>
-                {combined.changePct >= 0 ? '+' : ''}{combined.changePct.toFixed(1)}%
-              </dd>
-            </div>
-            <div>
-              <dt>Expected volatility</dt>
-              <dd><RiskPill level={first?.evidence?.risk_level} /></dd>
-            </div>
-            <div>
-              <dt>Expected range</dt>
-              <dd className="mono">{money(combined.low, currencySymbol)}–{money(combined.high, currencySymbol)}</dd>
-            </div>
-          </dl>
         </div>
       )}
 

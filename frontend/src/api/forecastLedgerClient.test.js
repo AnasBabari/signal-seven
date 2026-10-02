@@ -11,7 +11,7 @@ describe('forecast ledger client', () => {
   it('routes through the configured API base and keys cache by ticker and horizon', async () => {
     const fetchMock = vi.fn((url) => Promise.resolve({
       ok: true,
-      json: () => Promise.resolve({ entries: [{ url }] }),
+      json: () => Promise.resolve({ entries: [{ url, ticker: 'MSFT' }] }),
     }));
     vi.stubGlobal('fetch', fetchMock);
 

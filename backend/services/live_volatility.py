@@ -167,6 +167,13 @@ def _trailing_risk_context(frame, forecast_daily_variance: float) -> dict[str, o
         }
 
 
+def _snapshot_risk_context(snapshot, daily_variance):
+    import pandas as pd
+
+    frame = pd.DataFrame({"Close": snapshot.historical_prices})
+    return _trailing_risk_context(frame, daily_variance)
+
+
 def _build_g3_forecast(
     snapshot: VolatilityInferenceSnapshot, horizon: int, requested_model: str
 ) -> dict[str, Any]:
@@ -213,7 +220,11 @@ def _build_g3_forecast(
     if len(future_dates) != horizon:
         raise ValueError("calendar did not provide the requested forecast horizon")
     learned = model_name == GPU_G3_MODEL
-    risk = _trailing_risk_context(frame, variance / horizon) if learned else {}
+    risk = (
+        _trailing_risk_context(frame, variance / horizon)
+        if learned
+        else _snapshot_risk_context(snapshot, variance / horizon)
+    )
     return {
         "ticker": snapshot.ticker,
         "as_of": snapshot.origin_date,
@@ -251,7 +262,7 @@ def _build_g3_forecast(
             "selected_horizon": horizon,
             "fallback_used": fallback_reason,
             "test_evidence_qlike_vs_rolling": None,
-            "risk_level": risk.get("risk_level") if learned else None,
+            "risk_level": risk.get("risk_level"),
             "risk_ratio_vs_trailing_60d": risk.get("risk_ratio_vs_trailing_60d")
             if learned
             else None,
@@ -344,6 +355,7 @@ def build_live_volatility_forecast(
                 "Gaussian log-return reference model; not a point price forecast or "
                 "calibrated confidence interval."
             ),
+            **_snapshot_risk_context(snapshot, variance / normalized_horizon),
             "metric_source": "baseline_definition",
             "interval_method": "gaussian_reference_scenario",
             "interval_nominal_coverage": 0.90,

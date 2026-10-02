@@ -33,6 +33,7 @@ from sklearn.preprocessing import RobustScaler
 from calendars import future_trading_dates
 from config import settings
 from services import forecast_artifacts
+from services.training_budget import training_slot
 
 logger = logging.getLogger(__name__)
 
@@ -625,6 +626,20 @@ def _predict_gpu_lstm(
     return preds
 
 
+def _with_timing(result, started, status, **stages):
+    value = copy.deepcopy(result)
+    value["timing"] = {
+        "cache_status": status,
+        "artifact_lookup_ms": stages.get("lookup_ms", 0.0),
+        "model_load_ms": stages.get("model_load_ms", 0.0),
+        "features_ms": stages.get("features_ms", 0.0),
+        "train_ms": stages.get("train_ms", 0.0),
+        "infer_ms": stages.get("infer_ms", 0.0),
+        "service_total_ms": (time.perf_counter() - started) * 1000.0,
+    }
+    return value
+
+
 def train_and_forecast(
     ticker: str, frame: pd.DataFrame, model_name: str = "auto"
 ) -> dict[str, Any]:
@@ -632,7 +647,11 @@ def train_and_forecast(
     # This coordinates threads in one worker; disk cache also reuses completed work after restart.
     symbol = ticker.strip().upper()
     slot = int(hashlib.sha256(symbol.encode()).hexdigest(), 16) % len(_training_locks)
-    with _training_locks[slot]:
+    if not _training_locks[slot].acquire(timeout=2.0):
+        from services.training_budget import TrainingBusyError
+
+        raise TrainingBusyError("Forecast training is busy. Please retry shortly.")
+    try:
         global _gpu_signature
         signature = _checkpoint_signature()
         with _cache_lock:
@@ -642,6 +661,8 @@ def train_and_forecast(
                     clear_loader()
                 _gpu_signature = signature
         return _train_and_forecast_locked(ticker, frame, model_name)
+    finally:
+        _training_locks[slot].release()
 
 
 def _train_and_forecast_locked(
@@ -666,8 +687,10 @@ def _train_and_forecast_locked(
                 normalized_model,
                 (time.perf_counter() - started) * 1000.0,
             )
-            return copy.deepcopy(cached)
+            return _with_timing(cached, started, "memory_hit")
+    t_artifact = time.perf_counter()
     disk_cached = _load_fitted_forecast(cache_key)
+    lookup_ms = (time.perf_counter() - t_artifact) * 1000.0
     if disk_cached is not None:
         with _cache_lock:
             _cache[cache_key] = disk_cached
@@ -678,32 +701,31 @@ def _train_and_forecast_locked(
             normalized_model,
             (time.perf_counter() - started) * 1000.0,
         )
-        return copy.deepcopy(disk_cached)
+        return _with_timing(disk_cached, started, "artifact_hit", lookup_ms=lookup_ms)
 
+    # Only cache misses consume scarce fitting capacity. The context releases on errors.
+    with training_slot():
+        return _fit_forecast(
+            symbol, frame, normalized_model, data_as_of, cache_key, started, lookup_ms
+        )
+
+
+def _fit_forecast(symbol, frame, normalized_model, data_as_of, cache_key, started, lookup_ms):
     t_features = time.perf_counter()
     dataset = build_dataset(frame)
     train_mask, validation_mask, test_mask = chronological_masks(dataset, len(frame))
     features_ms = (time.perf_counter() - t_features) * 1000.0
     labelled_features = dataset.features.iloc[: dataset.labelled_count].to_numpy(dtype=np.float64)
     targets = dataset.targets
-    candidates = _candidate_models()
-    validation_scores: dict[str, float] = {}
-    validation_predictions: dict[str, np.ndarray] = {}
-    for name, model in candidates.items():
-        model.fit(labelled_features[train_mask], targets[train_mask])
-        predicted = _clip_predictions(
-            model.predict(labelled_features[validation_mask]), targets[train_mask]
-        )
-        validation_predictions[name] = predicted
-        validation_scores[name] = float(mean_absolute_error(targets[validation_mask], predicted))
-
     # Explicit checkpoint inference is experimental and supplies no historical metrics.
     if normalized_model in ("gpu_lstm", "lstm"):
+        t_load = time.perf_counter()
         loaded = _load_gpu_lstm_model()
         if loaded is None or symbol not in loaded[2]:
             raise ValueError(
                 "GPU price prediction unavailable: checkpoint provenance is unverified."
             )
+        model_load_ms = (time.perf_counter() - t_load) * 1000.0
         import torch
 
         model, scalers, tickers = loaded
@@ -721,29 +743,47 @@ def _train_and_forecast_locked(
         if not np.isfinite(prices).all() or (prices <= 0).any():
             raise ValueError("GPU checkpoint produced invalid prices")
         dates, calendar = future_trading_dates(symbol, frame.index[-1], FORECAST_DAYS)
-        return {
-            "ticker": symbol,
-            "data_as_of": data_as_of,
-            "current_price": float(frame["Close"].iloc[-1]),
-            "forecast_days": 7,
-            "predicted_prices": prices.tolist(),
-            "future_dates": dates,
-            "historical_dates": [v.date().isoformat() for v in frame.index[-90:]],
-            "historical_prices": frame["Close"].iloc[-90:].tolist(),
-            "model": {
-                "name": "gpu_lstm",
-                "requested": normalized_model,
-                "selected": "gpu_lstm",
-                "selection_reason": "explicit_verified_checkpoint",
-                "status": "experimental_point_only",
+        return _with_timing(
+            {
+                "ticker": symbol,
+                "data_as_of": data_as_of,
+                "current_price": float(frame["Close"].iloc[-1]),
+                "forecast_days": 7,
+                "predicted_prices": prices.tolist(),
+                "future_dates": dates,
+                "historical_dates": [v.date().isoformat() for v in frame.index[-90:]],
+                "historical_prices": frame["Close"].iloc[-90:].tolist(),
+                "model": {
+                    "name": "gpu_lstm",
+                    "requested": normalized_model,
+                    "selected": "gpu_lstm",
+                    "selection_reason": "explicit_verified_checkpoint",
+                    "status": "experimental_point_only",
+                },
+                "backtest": None,
+                "evaluation": {
+                    "status": "unavailable",
+                    "reason": "Serving checkpoint is not historical evaluation evidence",
+                },
+                "provenance": {**frame.attrs, "calendar": calendar, "feature_origin": data_as_of},
             },
-            "backtest": None,
-            "evaluation": {
-                "status": "unavailable",
-                "reason": "Serving checkpoint is not historical evaluation evidence",
-            },
-            "provenance": {**frame.attrs, "calendar": calendar, "feature_origin": data_as_of},
-        }
+            started,
+            "checkpoint",
+            lookup_ms=lookup_ms,
+            features_ms=features_ms,
+            model_load_ms=model_load_ms,
+        )
+
+    candidates = _candidate_models()
+    validation_scores: dict[str, float] = {}
+    validation_predictions: dict[str, np.ndarray] = {}
+    for name, model in candidates.items():
+        model.fit(labelled_features[train_mask], targets[train_mask])
+        predicted = _clip_predictions(
+            model.predict(labelled_features[validation_mask]), targets[train_mask]
+        )
+        validation_predictions[name] = predicted
+        validation_scores[name] = float(mean_absolute_error(targets[validation_mask], predicted))
 
     if normalized_model not in {"auto", *candidates}:
         raise ValueError("Unsupported explicit price model request.")
@@ -806,9 +846,11 @@ def _train_and_forecast_locked(
     production_model.fit(labelled_features, targets)
     latest_features = dataset.features.iloc[[-1]].to_numpy(dtype=np.float64)
     fitted = {"kind": "sklearn", "model": production_model, "inputs": latest_features}
+    t_infer = time.perf_counter()
     forecast_returns = _clip_predictions(
         production_model.predict(latest_features), targets
     ).reshape(-1)
+    infer_ms = (time.perf_counter() - t_infer) * 1000.0
     model_meta = {
         "name": selected_name,
         "kind": "learned_historical_model",
@@ -923,7 +965,15 @@ def _train_and_forecast_locked(
             forecast_artifacts.save(artifact_path.with_suffix(".artifact.json"), cache_key, fitted)
         except Exception:
             logger.warning("Fitted forecast could not be persisted; serving the fresh result")
-    return copy.deepcopy(result)
+    return _with_timing(
+        result,
+        started,
+        "trained",
+        lookup_ms=lookup_ms,
+        features_ms=features_ms,
+        infer_ms=infer_ms,
+        train_ms=max(0.0, total_ms - features_ms - lookup_ms - infer_ms),
+    )
 
 
 def clear_forecast_cache() -> None:
