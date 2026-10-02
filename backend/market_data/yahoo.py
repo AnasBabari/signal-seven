@@ -89,5 +89,7 @@ class YahooProvider:
         return MarketDataResult(
             frame=normalized,
             provider=self.name,
+            feed="yahoo_daily",
+            adjustment="auto_adjust_split_dividend",
             data_as_of=normalized.index[-1].date().isoformat(),
         )

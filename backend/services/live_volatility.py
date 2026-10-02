@@ -176,12 +176,24 @@ def _build_g3_forecast(
     (flagged in evidence) rather than failing the request; upstream market
     errors propagate to the route's usual 503/422 mapping.
     """
-    from data_pipeline import _download_ohlcv
     from services import g3_volatility as g3
 
     fallback_reason: str | None = None
     try:
-        frame = _download_ohlcv(snapshot.ticker)
+        import pandas as pd
+
+        if not getattr(snapshot, "raw_ohlcv", ()):
+            raise g3.G3UnavailableError("Snapshot does not contain immutable market observations")
+        frame = pd.DataFrame(
+            snapshot.raw_ohlcv,
+            index=pd.to_datetime(snapshot.raw_dates),
+            columns=["Open", "High", "Low", "Close", "Volume"],
+        )
+        if (
+            frame.index[-1].date().isoformat() != snapshot.origin_date
+            or float(frame["Close"].iloc[-1]) != snapshot.origin_close
+        ):
+            raise ValueError("Snapshot market origin mismatch")
         variance = g3.g3_cumulative_variance(frame, horizon)
         model_name = GPU_G3_MODEL
         variance_path = None

@@ -139,6 +139,14 @@ def _prepare_forecast(symbol: str, horizon: int, requested_model: str) -> _Prepa
     recent_values = snapshot.baseline_candidates["rolling_c2c_20"]
     recent_vol = math.sqrt(252.0 * float(recent_values[0]))
     evidence["volatility_units"] = "annualized_sigma_fraction"
+    evidence.update(
+        {
+            "data_fingerprint": getattr(snapshot, "data_fingerprint", ""),
+            "data_feed": getattr(snapshot, "data_feed", "unknown"),
+            "price_adjustment": getattr(snapshot, "price_adjustment", "unknown"),
+            "feature_origin": snapshot.origin_date,
+        }
+    )
     evidence["ledger_metric_version"] = "annualized_sigma_v1"
     active_model = str(forecast_result.get("forecast", {}).get("model", requested_model))
     record_kwargs = {
@@ -157,7 +165,11 @@ def _prepare_forecast(symbol: str, horizon: int, requested_model: str) -> _Prepa
         "feature_set_version": VOLATILITY_FEATURE_SET_VERSION,
         "code_commit": code_commit,
         "data_as_of": data_as_of,
-        "data_provider": data_provider,
+        "data_provider": (
+            f"{data_provider}|feed={getattr(snapshot, 'data_feed', 'unknown')}|adjustment={getattr(snapshot, 'price_adjustment', 'unknown')}|sha256={snapshot.data_fingerprint}"
+            if getattr(snapshot, "data_fingerprint", "")
+            else data_provider
+        ),
     }
     evidence["forecast_fingerprint"] = compute_forecast_fingerprint(**record_kwargs)
     return _PreparedForecast(

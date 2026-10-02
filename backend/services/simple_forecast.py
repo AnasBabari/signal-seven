@@ -273,7 +273,7 @@ SUPPORTED_TICKERS: tuple[str, ...] = tuple(
     dict.fromkeys(tuple(TICKER_METADATA.keys()) + _broad_tickers)
 )
 FORECAST_DAYS = 7
-FEATURE_VERSION = "simple-price-v1"
+FEATURE_VERSION = "simple-price-v2-zero-range-neutral"
 MIN_HISTORY_ROWS = 500
 
 
@@ -453,7 +453,9 @@ def build_features(frame: pd.DataFrame) -> pd.DataFrame:
         "return_20d": log_close.diff(20),
         "range_1d": intraday_range,
         "overnight_return": np.log(frame["Open"].astype(float) / previous_close),
-        "close_location": (close - frame["Low"]) / (frame["High"] - frame["Low"]),
+        "close_location": (
+            (close - frame["Low"]) / (frame["High"] - frame["Low"]).replace(0.0, np.nan)
+        ).fillna(0.5),
         "volume_change": log_volume.diff(),
         "drawdown_20d": close / close.rolling(20).max() - 1.0,
     }
@@ -476,6 +478,10 @@ def build_dataset(frame: pd.DataFrame) -> ForecastDataset:
     if len(frame) < MIN_HISTORY_ROWS:
         raise ValueError(f"At least {MIN_HISTORY_ROWS} completed sessions are required.")
     features = build_features(frame)
+    if features.empty or features.index[-1] != frame.index[-1]:
+        raise ValueError(
+            "Latest session cannot form valid price features; stale inference is prohibited."
+        )
     log_close = np.log(frame["Close"].astype(float))
     position_by_date = pd.Series(np.arange(len(frame), dtype=int), index=frame.index)
     labelled = features.index[
@@ -818,6 +824,10 @@ def _train_and_forecast_locked(
             "market_data_cache": str(frame.attrs.get("market_data_cache", "unknown")),
             "calendar": calendar,
             "completed_daily_bars_only": True,
+            "feature_origin": dataset.features.index[-1].date().isoformat(),
+            "data_feed": frame.attrs.get("data_feed", "unknown"),
+            "price_adjustment": frame.attrs.get("price_adjustment", "unknown"),
+            "data_fingerprint": frame.attrs.get("data_fingerprint", ""),
         },
         "news": {
             "role": "context_only",

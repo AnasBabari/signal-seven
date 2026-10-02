@@ -20,6 +20,9 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
+from backend.market_data.base import MarketDataProviderError
+from backend.market_data.normalization import normalize_daily_bars
+
 from .baselines import evaluate_predictions, training_majority
 from .news_archive import (
     MACRO_NEWS_FEATURE_NAMES,
@@ -148,19 +151,12 @@ class GlobalPriceDataset:
 def _normalise_ohlcv(frame: pd.DataFrame) -> pd.DataFrame:
     data = frame.copy()
     data.columns = [str(column).title() for column in data.columns]
-    required = ("Open", "High", "Low", "Close", "Volume")
-    if not set(required).issubset(data.columns):
-        raise ValueError(f"OHLCV frame is missing {sorted(set(required) - set(data.columns))}")
-    data = data.loc[:, required].apply(pd.to_numeric, errors="coerce")
-    data.index = pd.to_datetime(data.index, errors="coerce").tz_localize(None)
-    data = data.loc[~data.index.isna()]
-    data = data.loc[~data.index.duplicated(keep="last")].sort_index()
-    if len(data) < 500 or not np.isfinite(data.to_numpy(dtype=np.float64)).all():
-        raise ValueError("OHLCV frame is too short or contains non-finite values")
-    if (data[["Open", "High", "Low", "Close"]] <= 0).any().any():
-        raise ValueError("OHLC prices must be positive")
-    data["High"] = np.maximum(data["High"], data[["Open", "Close", "Low"]].max(axis=1))
-    data["Low"] = np.minimum(data["Low"], data[["Open", "Close", "High"]].min(axis=1))
+    try:
+        data = normalize_daily_bars(data, provider="research", symbol="session_labels")
+    except MarketDataProviderError as err:
+        raise ValueError("Invalid historical OHLCV data") from err
+    if len(data) < 500:
+        raise ValueError("OHLCV frame is too short")
     return data
 
 
@@ -180,7 +176,7 @@ def build_price_features(frame: pd.DataFrame) -> pd.DataFrame:
         "return_20d": log_close.diff(20),
         "range_1d": np.log(data["High"] / data["Low"]),
         "overnight_return": np.log(data["Open"] / close.shift(1)),
-        "close_location": (close - data["Low"]) / denominator,
+        "close_location": ((close - data["Low"]) / denominator).fillna(0.5),
         "volume_change": log_volume.diff(),
         "drawdown_20d": close / close.rolling(20).max() - 1.0,
     }

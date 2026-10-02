@@ -40,6 +40,9 @@ class MarketDataResult:
     provider: str
     data_as_of: str
     cache_status: str = "miss"
+    feed: str = "unknown"
+    adjustment: str = "unknown"
+    data_fingerprint: str = ""
 
 
 class MarketDataProvider(Protocol):

@@ -20,6 +20,7 @@ from market_data.base import (
     MarketDataSymbolNotFound,
 )
 from market_data.cache import MarketDataCache
+from market_data.normalization import daily_frame_fingerprint, normalize_daily_bars
 from market_data.yahoo import YahooProvider
 
 
@@ -31,8 +32,10 @@ class MarketDataService:
         providers: Iterable[MarketDataProvider],
         *,
         cache: MarketDataCache,
+        uk_providers: Iterable[MarketDataProvider] | None = None,
     ) -> None:
         self.providers = tuple(providers)
+        self.uk_providers = tuple(uk_providers) if uk_providers is not None else (YahooProvider(),)
         self.cache = cache
         self._lock = threading.RLock()
         self._last_success_session: str | None = None
@@ -42,21 +45,38 @@ class MarketDataService:
 
     def fetch_daily_bars(self, symbol: str, *, years: int) -> MarketDataResult:
         cal_name, _ = resolve_calendar(symbol)
+        if cal_name not in {"NYSE", "LSE"}:
+            raise MarketDataSymbolNotFound("This exchange has no configured daily provider.")
         if cal_name == "LSE":
             required_session = latest_completed_trading_session(exchange="LSE").date().isoformat()
         else:
             required_session = latest_completed_trading_session().date().isoformat()
         failures: list[MarketDataProviderError] = []
         unknowns: list[MarketDataSymbolNotFound] = []
-        for provider in self.providers:
-            cached = self.cache.load(provider.name, symbol, required_session=required_session)
+        active_providers = self.uk_providers if cal_name == "LSE" else self.providers
+        for provider in active_providers:
+            namespace = f"{provider.name}:{getattr(provider, 'feed', 'daily')}:{getattr(provider, 'adjustment', 'auto')}:{years}:session-v2"
+            cached = self.cache.load(
+                provider.name, symbol, required_session=required_session, namespace=namespace
+            )
             if cached is not None:
+                cached.frame.attrs.update(
+                    {
+                        "data_provider": cached.provider,
+                        "data_feed": cached.feed,
+                        "price_adjustment": cached.adjustment,
+                        "data_fingerprint": cached.data_fingerprint,
+                    }
+                )
                 self._record_success(cached)
                 return cached
             if not provider.configured:
                 continue
             try:
                 result = provider.fetch_daily_bars(symbol, years=years)
+                normalized = normalize_daily_bars(
+                    result.frame, provider=provider.name, symbol=symbol
+                )
             except MarketDataSymbolNotFound as err:
                 unknowns.append(err)
                 continue
@@ -67,9 +87,7 @@ class MarketDataService:
             # forecasting contract is end-of-session, so trim everything
             # after the latest completed NYSE session before validation and
             # caching.
-            completed = result.frame.loc[
-                result.frame.index <= pd.Timestamp(required_session)
-            ].copy()
+            completed = normalized.loc[normalized.index <= pd.Timestamp(required_session)].copy()
             completed_as_of = completed.index[-1].date().isoformat() if not completed.empty else ""
             if completed_as_of != required_session:
                 failures.append(
@@ -78,13 +96,25 @@ class MarketDataService:
                     )
                 )
                 continue
+            completed.attrs.update(
+                {
+                    "data_provider": result.provider,
+                    "data_feed": result.feed,
+                    "price_adjustment": result.adjustment,
+                }
+            )
+            fingerprint = daily_frame_fingerprint(completed)
+            completed.attrs["data_fingerprint"] = fingerprint
             result = MarketDataResult(
                 frame=completed,
+                feed=result.feed,
+                adjustment=result.adjustment,
+                data_fingerprint=fingerprint,
                 provider=result.provider,
                 data_as_of=completed_as_of,
                 cache_status=result.cache_status,
             )
-            self.cache.save(symbol, result)
+            self.cache.save(symbol, result, namespace=namespace)
             self._record_success(result)
             return result
         if failures:
@@ -125,6 +155,10 @@ class MarketDataService:
             return ready, {
                 "status": "available" if ready else "unavailable",
                 "configured_providers": configured,
+                "exchange_providers": {
+                    "US": configured,
+                    "LSE": [p.name for p in self.uk_providers if p.configured],
+                },
                 "last_provider": self._last_provider,
                 "last_success_at": self._last_success_at,
                 "last_success_session": self._last_success_session,

@@ -11,3 +11,11 @@ Settlement uses canonical daily data, scores only mature rows, separates total/p
 ## Price evidence
 
 The primary display remains the range midpoint. Point forecast metrics describe `predicted_prices`; midpoint and error-band coverage are unavailable unless separately evaluated. Reused chronological windows are retrospective. Legacy GPU deployment checkpoints cannot enter historical model selection or supply metrics without verified pre-evaluation training and scaler provenance.
+
+## Market-data contract
+
+History and forecasting use the same service: configured US chain, and explicit Yahoo daily bars for LSE. UK routing is exchange support, not a silent US feed fallback. No provider equivalence or paid feed requirement is asserted. Feed, adjustment, completed origin and full daily-data fingerprint travel with responses; live ledger provider provenance includes feed/adjustment/fingerprint when available. Cache identity includes feed, adjustment, years and contract version. Old cache namespaces are not reused.
+
+Session labels retain their provider-local calendar date; instant timestamps are explicitly converted to the exchange timezone. Impossible OHLC, missing/invalid values, nonpositive prices and negative volume fail closed. Zero-range sessions use neutral close-location 0.5 in both training and serving; latest feature origin must equal the declared origin. G3 reads immutable tuple observations captured by the snapshot and cannot redownload across a rollover.
+
+Stage 2 focused verification: 105 backend contract tests passed, including BST, partial UK session, zero-range final bar, provider cache identity and G3 no-second-read checks.

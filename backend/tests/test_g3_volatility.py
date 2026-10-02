@@ -239,13 +239,19 @@ def test_packaged_g3_artifacts_load_and_infer(tmp_path):
 def _snapshot(horizon=5):
     from types import SimpleNamespace
 
-    dates = pd.bdate_range(end="2026-09-02", periods=90)
-    closes = np.linspace(490.0, 500.0, 90)
+    raw = _ohlc_frame(800)
+    dates = raw.index[-90:]
+    closes = raw["Close"].to_numpy()[-90:]
     return SimpleNamespace(
         ticker="MSFT",
         snapshot_id="s" * 64,
-        origin_date="2026-09-02",
-        origin_close=500.0,
+        origin_date=raw.index[-1].date().isoformat(),
+        origin_close=float(raw["Close"].iloc[-1]),
+        raw_dates=tuple(d.date().isoformat() for d in raw.index),
+        raw_ohlcv=tuple(
+            tuple(float(v) for v in row)
+            for row in raw[["Open", "High", "Low", "Close", "Volume"]].to_numpy()
+        ),
         data_provider="alpaca",
         market_data_cache="hit",
         feature_names=("Return_1D", "Vol_C2C_20"),
@@ -263,7 +269,11 @@ def test_g3_serving_path_returns_promoted_cone(monkeypatch):
     import data_pipeline
     from services.live_volatility import build_live_volatility_forecast
 
-    monkeypatch.setattr(data_pipeline, "_download_ohlcv", lambda symbol: _ohlc_frame(800))
+    monkeypatch.setattr(
+        data_pipeline,
+        "_download_ohlcv",
+        lambda symbol: (_ for _ in ()).throw(AssertionError("No second download allowed")),
+    )
     body = build_live_volatility_forecast(_snapshot(), horizon=5, model="gpu_g3")
     assert body["forecast"]["model"] == "gpu_g3"
     assert body["evidence"]["model_status"] == "learned_model"
@@ -309,7 +319,11 @@ def test_g3_risk_framing_against_trailing_volatility(monkeypatch):
     import data_pipeline
     from services.live_volatility import _trailing_risk_context, build_live_volatility_forecast
 
-    monkeypatch.setattr(data_pipeline, "_download_ohlcv", lambda symbol: _ohlc_frame(800))
+    monkeypatch.setattr(
+        data_pipeline,
+        "_download_ohlcv",
+        lambda symbol: (_ for _ in ()).throw(AssertionError("No second download allowed")),
+    )
     body = build_live_volatility_forecast(_snapshot(), horizon=5, model="gpu_g3")
     assert body["evidence"]["risk_level"] in ("Low", "Moderate", "Elevated", "Unknown")
     ratio = body["evidence"]["risk_ratio_vs_trailing_60d"]
