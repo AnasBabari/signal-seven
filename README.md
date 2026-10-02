@@ -20,7 +20,7 @@ Interface example from browser verification, using controlled test data. This im
 
 - Search supported NASDAQ, NYSE, and London-listed stocks, with exchange-aware currencies.
 - Explore prices with zoom, pan, a crosshair, and time ranges based on available history.
-- View a seven-session learned price estimate, visually separated from actual prices.
+- View a seven-session experimental range midpoint, visually separated from actual prices.
 - Inspect a 5-, 10-, or 20-session volatility outlook and its model/fallback disclosure.
 - Read recent financial headlines as separate market context.
 - Inspect historical evaluation results and the source/date of the underlying data.
@@ -38,11 +38,15 @@ usable live data or a successful forecast.
 2. It builds historical return, volatility, trend, range, and volume features.
 3. Data is split chronologically into 70% training, 15% validation, and 15% test partitions.
    Seven-session targets crossing a partition boundary are purged.
-4. Ridge and Random Forest candidates compete on validation error. An available compatible
-   pretrained LSTM checkpoint can also participate.
+4. Ridge and Random Forest candidates compete on validation error. A verified pretrained LSTM
+   checkpoint is an explicit experimental option, not part of automatic model selection.
 5. For locally fitted models, the selected configuration is evaluated on the later test
    partition. A production model is then fitted using all resolved historical targets.
 6. Predicted cumulative log returns are converted into seven future price estimates.
+
+The chart displays the arithmetic midpoint of the historical error bounds, as requested.
+That midpoint is not the model's point forecast or an evaluated expected price. Historical
+performance measures describe the point forecasts; current-refit band coverage is unverified.
 
 The learned endpoint remains `/api/v1/forecast`. A no-change forecast is an evaluation baseline,
 not a hardcoded replacement for the learned price path.
@@ -63,7 +67,7 @@ rolling volatility. This is separate from the learned price endpoint's behavior.
 
 ### Reusing expensive work
 
-For US stocks, chart history warms the same daily market-data cache used by the price forecast.
+For US and UK stocks, chart history warms the same daily market-data cache used by the price forecast.
 Repeated requests can reuse a forecast for unchanged data rather than repeat training.
 Same-worker requests are coordinated to avoid duplicate training.
 
@@ -72,7 +76,8 @@ process restart and be loaded for inference. Changes to data, model configuratio
 runtime versions, or checkpoints invalidate reuse. Invalid artifacts fall through to training.
 
 **A local disk cache is not durable storage across Render instance replacement or redeploys.**
-UK chart history currently follows a separate Yahoo path. See the
+US data uses the configured provider chain; London-listed stocks use an explicit Yahoo adapter
+through the same completed-session service and cache interface. See the
 [artifact cache design and security notes](docs/FORECAST_ARTIFACT_CACHE.md).
 
 ## Limitations
@@ -96,7 +101,7 @@ UK chart history currently follows a separate Yahoo path. See the
 
 The app calls `/health` when the page opens and requests chart history for the selected stock.
 A sleeping Render service starts in the background while the interface displays its loading
-state. Daily history also warms the US forecast data cache.
+state. Daily history also warms the forecast data cache.
 
 Cold starts and the first model fit can still take time. Repeated requests can reuse cached work;
 the interface keeps unavailable data and degraded results explicit. Intraday history is best-effort.
@@ -156,7 +161,7 @@ npm run dev
 ```
 
 Open `http://localhost:5500`. Setting the URL explicitly keeps local requests on your local
-backend; the development proxy otherwise defaults to the hosted Render service.
+backend; the development proxy also defaults to `http://127.0.0.1:8000`.
 
 For production, set `VITE_API_URL` to the backend's public URL **before building** the frontend.
 
@@ -188,9 +193,10 @@ The [CI workflow](.github/workflows/ci.yml) is the source of truth for runner de
 - [GPU volatility provenance](artifacts/PROVENANCE_FINAL.md): G3 evaluation and integration record.
 - [Artifact cache design](docs/FORECAST_ARTIFACT_CACHE.md): reuse guarantees and operational limits.
 
-Remaining engineering work includes shared durable artifact storage, cross-worker training
-coordination, more complete latency telemetry, and unifying the UK/US cache interface. New
-research must remain separate from scored studies; adding a feature is not evidence that it helps.
+Per-worker fitting capacity is bounded. Optional PostgreSQL advisory locks can coordinate
+fitting across workers when explicitly configured; responses expose stage-level timings.
+Shared durable artifact storage remains future work. New research must remain separate from
+scored studies; adding a feature is not evidence that it helps.
 
 ## License
 

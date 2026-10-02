@@ -1,11 +1,12 @@
 services:
   - type: web
-    name: stock-predictor-backend
-    env: python
+    # Matches existing service srv-d9i97s7avr4c73adg050; do not create a duplicate.
+    name: stock-predictor-lstm
+    runtime: python
     plan: free
-    region: oregon
+    region: frankfurt
     branch: main
-    autoDeploy: checksPass
+    autoDeployTrigger: checksPass
     healthCheckPath: /health
     buildCommand: "pip install --no-cache-dir uv==0.11.16 && uv sync --project backend --active --frozen --no-dev --no-install-project"
     # Install from the same frozen uv.lock used by CI and the Docker image into
@@ -23,7 +24,7 @@ services:
         - docs/**
         - frontend/**
     previews:
-      generation: automatic
+      generation: "off"
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9

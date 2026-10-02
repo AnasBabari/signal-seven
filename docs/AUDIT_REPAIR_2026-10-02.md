@@ -49,3 +49,20 @@ Local browser verification uses fixtures, not live market predictions. Screensho
 No push, deployment, authenticated collection, settlement, live-ledger export or production correction was performed. Existing data/options user files remain untouched. New compatibility labels leave legacy ledger records immutable. The bounded two-epoch development price comparison does not beat persistence or the train-majority direction comparator and does not establish independent predictive superiority. Legacy checkpoints and missing archival outputs were not repurposed as evidence.
 
 Final acceptance: 300 backend/research tests, 163 frontend tests and 14 Chromium browser tests pass. Ruff check and format check pass; Vite production build passes. One upstream Starlette/httpx deprecation warning remains. The GPU comparison and visual evidence are preserved as small, explicitly scoped local artifacts; temporary test/runtime directories are removed.
+
+## Authorized release review
+
+Following explicit authorization to review, push and verify production, the Render control plane
+confirmed existing service `srv-d9i97s7avr4c73adg050`, named `stock-predictor-lstm`, in
+`frankfurt` on the free plan. It tracks `main` with `checksPass` automatic deployments and
+previews disabled. The blueprint is aligned to those observed settings; no service relocation,
+replacement, creation, secret update or live-ledger operation is required. Vercel project
+`prj_xVDiEtgqOpmZKeyzNEPC9tNSOOe4` is the existing `stock-predictor-lstm` project.
+
+The remote README-only commit `dc66d50` was preserved by a normal merge before release.
+The repair tree independently passed the same 300 Python and 163 frontend tests, lint,
+formatting and production build checks. All 14 fixture-based browser contracts also passed;
+desktop/mobile fixture captures were refreshed. The blueprint passed validation against Render's
+official JSON schema. Post-push CI/deployment probes remain separate release checks; the earlier
+production report above describes the pre-release deployment, not evidence that these changes
+were already live.
