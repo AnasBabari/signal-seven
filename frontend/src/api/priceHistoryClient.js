@@ -25,9 +25,11 @@ export async function fetchPriceHistory(ticker, { signal, timeoutMs = 20_000 } =
   if (cached) return { ...cached, meta: { fetchMs: 0, fromCache: true } };
   const startedAt = (typeof performance !== 'undefined' ? performance.now() : Date.now());
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
   const abort = () => controller.abort();
   signal?.addEventListener('abort', abort, { once: true });
+  if (signal?.aborted) controller.abort();
   try {
     const base = getApiBase();
     const response = await fetch(`${base}/api/v1/history?ticker=${encodeURIComponent(symbol)}`, {
@@ -54,6 +56,9 @@ export async function fetchPriceHistory(ticker, { signal, timeoutMs = 20_000 } =
     const withMeta = { ...result, meta: { fetchMs: Math.round(finishedAt - startedAt), fromCache: false } };
     cache.set(symbol, result);
     return withMeta;
+  } catch (error) {
+    if (timedOut && !signal?.aborted) throw new DOMException("The request timed out. Please retry.", "TimeoutError");
+    throw error;
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener('abort', abort);

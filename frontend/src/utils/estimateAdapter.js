@@ -57,6 +57,10 @@ export function getSharedEstimatePresentation({ forecast, history, currencySymbo
   return {
     isAvailable: true, isMismatch: false, mismatchReason: null, reason: null,
     series, futureDates: [...dates], finalPrice, changePct,
+    label: 'Range midpoint — experimental',
+    pointEstimate: Array.isArray(forecast.predicted_prices) && forecast.predicted_prices.length === 7
+      && forecast.predicted_prices.every(positive) ? Number(forecast.predicted_prices[6]) : null,
+    midpointEvaluation: 'unavailable',
     direction: Math.abs(changePct) < 0.001 ? 'flat' : changePct > 0 ? 'up' : 'down',
   };
 }

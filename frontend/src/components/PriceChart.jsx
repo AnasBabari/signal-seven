@@ -590,7 +590,7 @@ export default function PriceChart({
                 </span>
               )}
               <span className="t212-range-name">
-                {activeRange === 'MAX' ? 'All time' : activeRange}
+                {activeRange === 'MAX' ? 'Available history' : activeRange}
               </span>
               {dataDate && !points.isIntraday && (
                 <span className="t212-data-date" title={`Market data through ${dataDate}`}>
@@ -730,13 +730,13 @@ export default function PriceChart({
           <div className="estimate-summary-text">
             <span className="estimate-dot" aria-hidden="true" />
             <span>
-              <strong>Day 7 estimate:</strong> {formatMoneyLocal(estimate.finalPrice, currencySymbol)} ·{' '}
+              <strong>Range midpoint — experimental:</strong> {formatMoneyLocal(estimate.finalPrice, currencySymbol)} ·{' '}
               <span className={`estimate-delta ${estimate.direction}`}>
                 {estimate.changePct != null && Number.isFinite(estimate.changePct)
                   ? `${estimate.changePct > 0 ? '+' : ''}${estimate.changePct.toFixed(1)}%`
                   : '—'}
               </span>{' '}
-              from the latest close.
+              from the latest close. After 7 trading sessions · {estimate.futureDates.at(-1)}
             </span>
             <button
               type="button"
@@ -751,7 +751,9 @@ export default function PriceChart({
 
           {showEstimateInfo && (
             <p className="estimate-inline-explanation">
-              Model estimate re-fitted on daily closing prices. Past performance does not guarantee future results.
+              The displayed midpoint averages the two historical error bounds. It has not been separately evaluated.
+              {estimate.pointEstimate != null ? ` The model point forecast is ${formatMoneyLocal(estimate.pointEstimate, currencySymbol)}.` : ' The model point forecast is unavailable.'}
+              {' '}The bounds are historical error bands; their coverage for this refit is unverified.
             </p>
           )}
         </div>

@@ -155,7 +155,7 @@ describe('simplified forecast app', () => {
     expect(button).toBeDisabled();
     expect(container.querySelector('#chartContainer')).not.toBeInTheDocument();
     expect(container.querySelector('.t212-chart-skeleton')).not.toBeInTheDocument();
-    expect(screen.queryByText(/Day 7 estimate:/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Range midpoint — experimental:/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/recent .* headlines/i)).not.toBeInTheDocument();
     await screen.findByText('Forecast service ready');
   });
@@ -169,7 +169,7 @@ describe('simplified forecast app', () => {
     await user.click(screen.getByRole('button', { name: /view outlook/i }));
 
     // Chart has the single in-chart estimate line
-    expect(await screen.findByText(/Day 7 estimate:/i)).toBeInTheDocument();
+    expect(await screen.findByText(/Range midpoint — experimental:/i)).toBeInTheDocument();
     expect(screen.getByText(/\$452\.00/)).toBeInTheDocument();
     expect(screen.queryByText(/empirical band/i)).not.toBeInTheDocument();
 
@@ -219,7 +219,7 @@ describe('simplified forecast app', () => {
     const input = screen.getByLabelText(/stock ticker/i);
     await user.clear(input);
     await user.type(input, `${symbol}{Enter}`);
-    await screen.findByText(/Day 7 estimate:/i);
+    await screen.findByText(/Range midpoint — experimental:/i);
     expect(input).toHaveValue(symbol.toUpperCase());
     expect(global.fetch).toHaveBeenCalledWith(
       expect.stringContaining(`/api/v1/forecast?ticker=${symbol.toUpperCase()}`),
@@ -290,7 +290,7 @@ describe('simplified forecast app', () => {
     await user.type(input, 'MSFT');
     await user.click(screen.getByRole('button', { name: /view outlook/i }));
 
-    await screen.findByText(/Day 7 estimate:/i);
+    await screen.findByText(/Range midpoint — experimental:/i);
     // Switch to News tab
     const newsTab = screen.getByRole('tab', { name: /news/i });
     await user.click(newsTab);
@@ -312,14 +312,14 @@ describe('simplified forecast app', () => {
     const input = screen.getByLabelText(/stock ticker/i);
     await user.type(input, 'MSFT');
     await user.click(screen.getByRole('button', { name: /view outlook/i }));
-    await screen.findByText(/Day 7 estimate:/i);
+    await screen.findByText(/Range midpoint — experimental:/i);
 
     const callCountBeforeTyping = global.fetch.mock.calls.length;
     // Typing another ticker should not trigger requests or change current results
     await user.clear(input);
     await user.type(input, 'NVDA');
     expect(global.fetch.mock.calls.length).toBe(callCountBeforeTyping);
-    expect(screen.getByText(/Day 7 estimate:/i)).toBeInTheDocument();
+    expect(screen.getByText(/Range midpoint — experimental:/i)).toBeInTheDocument();
   });
 
   it('retains usable chart and shows actionable forecast error on partial results', async () => {
@@ -461,7 +461,7 @@ describe('simplified forecast app', () => {
     resolveFirstForecast();
 
     // The rendered outlook must be MSFT, never overwritten by NVDA
-    await screen.findByText(/Day 7 estimate:/i);
+    await screen.findByText(/Range midpoint — experimental:/i);
     expect(screen.getAllByText(/data through 2026-09-03/i).length).toBeGreaterThan(0);
     expect(screen.queryByText('NVDA (NVDA)')).not.toBeInTheDocument();
   });
@@ -519,7 +519,7 @@ describe('simplified forecast app', () => {
     await user.click(retryBtn);
 
     // Forecast resolves successfully
-    expect(await screen.findByText(/Day 7 estimate:/i)).toBeInTheDocument();
+    expect(await screen.findByText(/Range midpoint — experimental:/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/MSFT price chart/i)).toBeInTheDocument();
   });
 
@@ -598,7 +598,7 @@ describe('simplified forecast app', () => {
     await user.type(input, 'SHEL.L');
     await user.click(screen.getByRole('button', { name: /view outlook/i }));
 
-    expect(await screen.findByText(/Day 7 estimate:/i)).toBeInTheDocument();
+    expect(await screen.findByText(/Range midpoint — experimental:/i)).toBeInTheDocument();
     expect(screen.getByText('2,600.5p')).toBeInTheDocument();
     expect(screen.queryByText(/p2,600/)).not.toBeInTheDocument();
   });
@@ -611,7 +611,7 @@ describe('simplified forecast app', () => {
     await user.type(input, 'MSFT');
     await user.click(screen.getByRole('button', { name: /view outlook/i }));
 
-    await screen.findByText(/Day 7 estimate:/i);
+    await screen.findByText(/Range midpoint — experimental:/i);
     const expandBtn = screen.getByRole('button', { name: /expand chart/i });
     await user.click(expandBtn);
 

@@ -729,150 +729,47 @@ def _train_and_forecast_locked(
         validation_predictions[name] = predicted
         validation_scores[name] = float(mean_absolute_error(targets[validation_mask], predicted))
 
-    gpu_lstm_info = _load_gpu_lstm_model()
-    use_gpu_lstm = False
-    if gpu_lstm_info is not None:
-        lstm_model, scalers, gpu_tickers = gpu_lstm_info
-        if symbol in gpu_tickers:
-            use_gpu_lstm = True
-            f_mean = np.array(scalers["feature_mean"], dtype=np.float32)
-            f_std = np.array(scalers["feature_std"], dtype=np.float32)
-            f_std[f_std < 1e-8] = 1.0
-            t_mean = np.array(scalers["target_mean"], dtype=np.float32)
-            t_std = np.array(scalers["target_std"], dtype=np.float32)
-            t_idx = gpu_tickers.index(symbol)
-
-            val_origins = np.where(validation_mask)[0]
-            feat_all = dataset.features.iloc[: dataset.labelled_count].to_numpy(dtype=np.float32)
-            val_pred_arr = _clip_predictions(
-                _predict_gpu_lstm(
-                    lstm_model,
-                    feat_all,
-                    val_origins,
-                    f_mean,
-                    f_std,
-                    t_mean,
-                    t_std,
-                    t_idx,
-                    validation_predictions["ridge"],
-                ),
-                targets[train_mask],
-            )
-            validation_predictions["gpu_lstm"] = val_pred_arr
-            validation_scores["gpu_lstm"] = float(
-                mean_absolute_error(targets[validation_mask], val_pred_arr)
-            )
-
-    if normalized_model in ("gpu_lstm", "lstm") and use_gpu_lstm:
-        selected_name = "gpu_lstm"
-    elif normalized_model in candidates:
-        selected_name = normalized_model
-    else:
-        selected_name = min(validation_scores, key=validation_scores.get)
+    # Deployment refits lack pre-evaluation training/scaler provenance and must
+    # never enter historical selection or supply historical metrics.
+    if normalized_model in ("gpu_lstm", "lstm"):
+        raise ValueError("GPU price evaluation unavailable: checkpoint provenance is unverified.")
+    if normalized_model not in {"auto", *candidates}:
+        raise ValueError("Unsupported explicit price model request.")
+    selected_name = (
+        normalized_model
+        if normalized_model in candidates
+        else min(validation_scores, key=validation_scores.get)
+    )
     select_ms = (time.perf_counter() - started) * 1000.0 - features_ms
 
-    if selected_name == "gpu_lstm" and use_gpu_lstm:
-        assert gpu_lstm_info is not None
-        lstm_model, scalers, gpu_tickers = gpu_lstm_info
-        import torch
+    evaluation_model = _candidate_models()[selected_name]
+    development_mask = train_mask | validation_mask
+    evaluation_model.fit(labelled_features[development_mask], targets[development_mask])
+    test_prediction = _clip_predictions(
+        evaluation_model.predict(labelled_features[test_mask]), targets[development_mask]
+    )
+    metrics = _metrics(targets[test_mask], test_prediction)
 
-        val_pred_arr = validation_predictions["gpu_lstm"]
-        validation_residuals = targets[validation_mask] - val_pred_arr
-        residual_low = np.quantile(validation_residuals, 0.10, axis=0)
-        residual_high = np.quantile(validation_residuals, 0.90, axis=0)
+    # The uncertainty band is calibrated on validation residuals only.
+    validation_residuals = targets[validation_mask] - validation_predictions[selected_name]
+    residual_low = np.quantile(validation_residuals, 0.10, axis=0)
+    residual_high = np.quantile(validation_residuals, 0.90, axis=0)
 
-        # Forecast using latest 60 features
-        latest_seq = dataset.features.iloc[-60:].to_numpy(dtype=np.float32)
-        if len(latest_seq) == 60:
-            norm_seq = (latest_seq - f_mean) / f_std
-            fitted = {
-                "kind": "checkpoint",
-                "inputs": norm_seq,
-                "target_mean": t_mean,
-                "target_std": t_std,
-                "scalers": scalers,
-                "checkpoint_hash": _checkpoint_signature(),
-            }
-            t_id = torch.tensor([t_idx], dtype=torch.long)
-            with torch.no_grad():
-                out = lstm_model(torch.tensor(norm_seq).unsqueeze(0).float(), t_id)
-            forecast_returns = (out.detach().numpy()[0] * t_std + t_mean).astype(np.float64)
-            forecast_returns = _clip_predictions(forecast_returns.reshape(1, -1), targets).reshape(
-                -1
-            )
-        else:
-            prod_model = _candidate_models()["ridge"]
-            prod_model.fit(labelled_features, targets)
-            fitted = {
-                "kind": "sklearn",
-                "model": prod_model,
-                "inputs": dataset.features.iloc[[-1]].to_numpy(dtype=np.float64),
-            }
-            forecast_returns = _clip_predictions(
-                prod_model.predict(dataset.features.iloc[[-1]].to_numpy(dtype=np.float64)), targets
-            ).reshape(-1)
-
-        # Honest Test metrics: evaluate GPU LSTM on untouched test split
-        eval_model = _candidate_models()["ridge"]
-        dev_mask = train_mask | validation_mask
-        eval_model.fit(labelled_features[dev_mask], targets[dev_mask])
-        test_pred_ridge = _clip_predictions(
-            eval_model.predict(labelled_features[test_mask]), targets[dev_mask]
-        )
-
-        test_origins = np.where(test_mask)[0]
-        test_pred = _clip_predictions(
-            _predict_gpu_lstm(
-                lstm_model,
-                feat_all,
-                test_origins,
-                f_mean,
-                f_std,
-                t_mean,
-                t_std,
-                t_idx,
-                test_pred_ridge,
-            ),
-            targets[dev_mask],
-        )
-        metrics = _metrics(targets[test_mask], test_pred)
-        model_meta = {
-            "name": "gpu_lstm",
-            "kind": "learned_gpu_lstm_model",
-            "feature_version": "price-v2-rtx2060",
-            "target": "direct_cumulative_log_returns_1_to_7_sessions",
-            "selection": "lowest validation MAE among learned candidates (CUDA RTX 2060 LSTM)",
-            "candidate_validation_mae": validation_scores,
-        }
-    else:
-        evaluation_model = _candidate_models()[selected_name]
-        development_mask = train_mask | validation_mask
-        evaluation_model.fit(labelled_features[development_mask], targets[development_mask])
-        test_prediction = _clip_predictions(
-            evaluation_model.predict(labelled_features[test_mask]), targets[development_mask]
-        )
-        metrics = _metrics(targets[test_mask], test_prediction)
-
-        # The uncertainty band is calibrated on validation residuals only.
-        validation_residuals = targets[validation_mask] - validation_predictions[selected_name]
-        residual_low = np.quantile(validation_residuals, 0.10, axis=0)
-        residual_high = np.quantile(validation_residuals, 0.90, axis=0)
-
-        production_model = _candidate_models()[selected_name]
-        production_model.fit(labelled_features, targets)
-        latest_features = dataset.features.iloc[[-1]].to_numpy(dtype=np.float64)
-        fitted = {"kind": "sklearn", "model": production_model, "inputs": latest_features}
-        forecast_returns = _clip_predictions(
-            production_model.predict(latest_features), targets
-        ).reshape(-1)
-        model_meta = {
-            "name": selected_name,
-            "kind": "learned_historical_model",
-            "feature_version": FEATURE_VERSION,
-            "target": "direct_cumulative_log_returns_1_to_7_sessions",
-            "selection": "lowest validation MAE among learned candidates",
-            "candidate_validation_mae": validation_scores,
-        }
+    production_model = _candidate_models()[selected_name]
+    production_model.fit(labelled_features, targets)
+    latest_features = dataset.features.iloc[[-1]].to_numpy(dtype=np.float64)
+    fitted = {"kind": "sklearn", "model": production_model, "inputs": latest_features}
+    forecast_returns = _clip_predictions(
+        production_model.predict(latest_features), targets
+    ).reshape(-1)
+    model_meta = {
+        "name": selected_name,
+        "kind": "learned_historical_model",
+        "feature_version": FEATURE_VERSION,
+        "target": "direct_cumulative_log_returns_1_to_7_sessions",
+        "selection": "lowest validation MAE among learned candidates",
+        "candidate_validation_mae": validation_scores,
+    }
 
     current_price = float(frame["Close"].iloc[-1])
     predicted_prices = current_price * np.exp(forecast_returns)
@@ -910,7 +807,10 @@ def _train_and_forecast_locked(
             "test_start": test_dates[0].date().isoformat(),
             "test_end": test_dates[-1].date().isoformat(),
             "test_samples": int(test_mask.sum()),
-            "metric_source": "untouched_chronological_test",
+            "metric_source": "retrospective_chronological_test",
+            "evaluated_series": "predicted_prices",
+            "midpoint_evaluation": "unavailable",
+            "interval_coverage": "unavailable",
             **metrics,
         },
         "provenance": {

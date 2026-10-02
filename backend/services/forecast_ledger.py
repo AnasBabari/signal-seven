@@ -970,7 +970,7 @@ class ForecastLedger:
         record_source: str = "live",
     ) -> dict[str, Any]:
         """Compute aggregate empirical track record accuracy metrics for a specific record source."""
-        query = "SELECT * FROM forecast_ledger WHERE status='scored' AND record_source=?"
+        query = "SELECT * FROM forecast_ledger WHERE record_source=?"
         params: list[Any] = [str(record_source)]
 
         if ticker:
@@ -984,10 +984,16 @@ class ForecastLedger:
             cursor = conn.execute(query, params)
             rows = cursor.fetchall()
 
+        total_forecasts = len(rows)
+        pending_forecasts = sum(row["status"] == "pending" for row in rows)
+        rows = [row for row in rows if row["status"] == "scored"]
         if not rows:
             return {
                 "record_source": record_source,
-                "total_forecasts": 0,
+                "total_forecasts": total_forecasts,
+                "pending_forecasts": pending_forecasts,
+                "direction_metric_version": "annualized_sigma_v1",
+                "direction_eligible_forecasts": 0,
                 "scored_forecasts": 0,
                 "mean_mae": None,
                 "mean_rmse": None,
@@ -1005,7 +1011,9 @@ class ForecastLedger:
         direction_hits = 0
         total_direction = 0
         for r in rows:
-            if r["actual_realized_volatility"] is not None:
+            if r["actual_realized_volatility"] is not None and str(r["model_version"]).endswith(
+                ":annualized_sigma_v1"
+            ):
                 pred_delta = r["predicted_volatility"] - r["recent_realized_volatility"]
                 actual_delta = r["actual_realized_volatility"] - r["recent_realized_volatility"]
                 if (pred_delta >= 0 and actual_delta >= 0) or (pred_delta < 0 and actual_delta < 0):
@@ -1014,7 +1022,10 @@ class ForecastLedger:
 
         return {
             "record_source": record_source,
-            "total_forecasts": len(rows),
+            "total_forecasts": total_forecasts,
+            "pending_forecasts": pending_forecasts,
+            "direction_metric_version": "annualized_sigma_v1",
+            "direction_eligible_forecasts": total_direction,
             "scored_forecasts": len(rows),
             "mean_mae": float(np.mean(abs_errors)) if abs_errors else None,
             "mean_rmse": float(np.sqrt(np.mean(sq_errors))) if sq_errors else None,

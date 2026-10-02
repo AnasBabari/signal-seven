@@ -77,7 +77,7 @@ function BacktestPanel({ backtest }) {
       </div>
       <p className="method-note">
         Tested on {backtest.test_samples} past forecasts from {backtest.test_start} to {backtest.test_end}.
-        These dates were kept separate when choosing the model. Past results do not guarantee future performance.
+        These are retrospective point forecast results. The displayed range midpoint has not been separately evaluated. Past results do not guarantee future performance.
       </p>
     </section>
   );
@@ -93,12 +93,14 @@ function formatNewsTimestamp(publishedAt) {
         month: 'short',
         day: 'numeric',
         year: 'numeric',
+        timeZone: 'UTC',
       }) +
       ' · ' +
       d.toLocaleTimeString('en-US', {
         hour: '2-digit',
         minute: '2-digit',
         hour12: false,
+        timeZone: 'UTC',
       }) +
       ' UTC'
     );
@@ -605,7 +607,7 @@ export default function App() {
                     <BacktestPanel backtest={forecast.backtest} />
                   ) : (
                     <div className="panel empty-performance-panel">
-                      <p className="empty-copy">Historical evaluation metrics for the price model will appear when the forecast finishes loading.</p>
+                      <p className="empty-copy">{loading ? 'Loading price evidence…' : 'Price evaluation is unavailable for this forecast. Retry the forecast to try again.'}</p>
                     </div>
                   )}
 

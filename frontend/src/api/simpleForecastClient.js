@@ -6,7 +6,8 @@ const API_BASE = getApiBase();
 
 async function getJson(path, { signal, timeoutMs = 120_000 } = {}) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
   const abort = () => controller.abort();
   signal?.addEventListener('abort', abort, { once: true });
   if (signal?.aborted) controller.abort();
@@ -20,6 +21,9 @@ async function getJson(path, { signal, timeoutMs = 120_000 } = {}) {
       throw error;
     }
     return payload;
+  } catch (error) {
+    if (timedOut && !signal?.aborted) throw new DOMException("The request timed out. Please retry.", "TimeoutError");
+    throw error;
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener('abort', abort);

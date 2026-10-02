@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 from fastapi.testclient import TestClient
 
 from api import app
@@ -378,27 +379,20 @@ def test_alpaca_credentials_whitespace_sanitization(monkeypatch) -> None:
     assert res["provider"] != "alpaca"
 
 
-def test_train_and_forecast_gpu_lstm_selected_when_available() -> None:
-    from services.simple_forecast import (
-        _load_gpu_lstm_model,
-        clear_forecast_cache,
-        train_and_forecast,
-    )
+def test_deployment_checkpoint_never_supplies_selection_or_metrics(monkeypatch) -> None:
+    from services import simple_forecast as sf
 
-    if _load_gpu_lstm_model() is None:
-        return
+    sf.clear_forecast_cache()
 
-    clear_forecast_cache()
-    frame = _frame(rows=900)
-    res = train_and_forecast("TSLA", frame, model_name="auto")
-    assert res["ticker"] == "TSLA"
-    assert len(res["predicted_prices"]) == 7
-    # Candidate scores must contain gpu_lstm
-    assert "gpu_lstm" in res["model"]["candidate_validation_mae"]
-    # Backtest metrics must be computed and present
-    assert res["backtest"]["mae_percent"] > 0
-    assert res["backtest"]["direction_accuracy"] > 0
-    assert res["backtest"]["test_samples"] > 0
+    def forbidden():
+        raise AssertionError("Deployment refit must not be evaluated")
+
+    monkeypatch.setattr(sf, "_load_gpu_lstm_model", forbidden)
+    result = sf.train_and_forecast("TSLA", _frame(rows=700))
+    assert "gpu_lstm" not in result["model"]["candidate_validation_mae"]
+    assert result["backtest"]["metric_source"] == "retrospective_chronological_test"
+    with pytest.raises(ValueError, match="provenance"):
+        sf.train_and_forecast("TSLA", _frame(rows=700), "gpu_lstm")
 
 
 def test_multi_exchange_lse_forecast_contract() -> None:

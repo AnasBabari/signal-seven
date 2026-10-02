@@ -53,3 +53,21 @@ describe('priceHistoryClient', () => {
     await expect(fetchPriceHistory('MSFT')).rejects.toThrow('down');
   });
 });
+
+
+it('distinguishes deadline from parent cancellation', async () => {
+  vi.useFakeTimers();
+  vi.stubGlobal('fetch', vi.fn((url, { signal }) => new Promise((resolve, reject) => {
+    signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+  })));
+  clearPriceHistoryCache();
+  const result = fetchPriceHistory('AAPL', { timeoutMs: 10 });
+  const assertion = expect(result).rejects.toMatchObject({ name: 'TimeoutError' });
+  await vi.advanceTimersByTimeAsync(10);
+  await assertion;
+  const controller = new AbortController();
+  const cancelled = fetchPriceHistory('AAPL', { signal: controller.signal });
+  controller.abort();
+  await expect(cancelled).rejects.toMatchObject({ name: 'AbortError' });
+  vi.useRealTimers();
+});

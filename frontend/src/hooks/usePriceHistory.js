@@ -38,12 +38,13 @@ export function usePriceHistory(ticker) {
         }
       })
       .catch((err) => {
-        if (seqRef.current === id && err?.name !== 'AbortError') {
+        if (seqRef.current === id && !controller.signal.aborted) {
           setHistory(null);
           setLoading(false);
           setError(err?.message || 'Price history is unavailable right now.');
         }
-      });
+      })
+      .finally(() => { if (seqRef.current === id && !controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, [ticker, retryTick]);
 
