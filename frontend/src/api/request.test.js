@@ -14,3 +14,9 @@ it('rejects mismatched origin and fingerprint before evidence is displayed', () 
   expect(() => assertMarketIdentity({ ticker: 'MSFT', data_as_of: '2026-09-02' }, { ticker: 'MSFT', asOf: '2026-09-03' })).toThrow('origins differ');
   expect(() => assertMarketIdentity({ ticker: 'MSFT', provenance: { data_fingerprint: 'a' } }, { ticker: 'MSFT', dataFingerprint: 'b' })).toThrow('identities differ');
 });
+
+it('rejects incompatible known feed and adjustment identities', () => {
+  const expected = { ticker: 'MSFT', feed: 'iex', adjustment: 'all' };
+  expect(() => assertMarketIdentity({ ticker: 'MSFT', evidence: { data_feed: 'sip' } }, expected)).toThrow('feed identities differ');
+  expect(() => assertMarketIdentity({ ticker: 'MSFT', provenance: { price_adjustment: 'raw' } }, expected)).toThrow('adjustment identities differ');
+});

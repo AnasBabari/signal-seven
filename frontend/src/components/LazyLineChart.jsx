@@ -1,4 +1,5 @@
 import React, { forwardRef, useState, useEffect } from 'react';
+import { withDeadline } from '../api/request';
 
 const loadChartEngine = () => Promise.all([import('chart.js'), import('react-chartjs-2')]);
 
@@ -10,7 +11,7 @@ const LazyLineChart = forwardRef(function LazyLineChart({ loadEngine = loadChart
   useEffect(() => {
     let isMounted = true;
     setError(false);
-    loadEngine()
+    withDeadline(() => loadEngine(), { timeoutMs: 20_000 })
       .then(([chartJsModule, reactChartJsModule]) => {
         if (!isMounted) return;
         const {

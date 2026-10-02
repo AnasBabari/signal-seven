@@ -263,12 +263,8 @@ def _build_g3_forecast(
             "fallback_used": fallback_reason,
             "test_evidence_qlike_vs_rolling": None,
             "risk_level": risk.get("risk_level"),
-            "risk_ratio_vs_trailing_60d": risk.get("risk_ratio_vs_trailing_60d")
-            if learned
-            else None,
-            "trailing_annualized_volatility_60d": risk.get("trailing_annualized_volatility_60d")
-            if learned
-            else None,
+            "risk_ratio_vs_trailing_60d": risk.get("risk_ratio_vs_trailing_60d"),
+            "trailing_annualized_volatility_60d": risk.get("trailing_annualized_volatility_60d"),
             "promotion_reference": "artifacts/g3_panel_v1/manifest.json" if learned else None,
             "scenario_label": "gaussian_model_implied_price_range",
             "scenario_description": (
@@ -284,6 +280,9 @@ def _build_g3_forecast(
             "target_definition": "sqrt(252 / H * sum(next H close-to-close log returns squared))",
             "snapshot_id": snapshot.snapshot_id,
             "data_provider": getattr(snapshot, "data_provider", "unknown"),
+            "data_feed": getattr(snapshot, "data_feed", "unknown"),
+            "price_adjustment": getattr(snapshot, "price_adjustment", "unknown"),
+            "data_fingerprint": getattr(snapshot, "data_fingerprint", ""),
             "data_as_of": getattr(snapshot, "data_as_of", None) or snapshot.origin_date,
             "market_data_cache": getattr(snapshot, "market_data_cache", "unknown"),
             "schema_version": "deployable_v5",
@@ -364,6 +363,9 @@ def build_live_volatility_forecast(
             "target_definition": "sqrt(252 / H * sum(next H close-to-close log returns squared))",
             "snapshot_id": snapshot.snapshot_id,
             "data_provider": getattr(snapshot, "data_provider", "unknown"),
+            "data_feed": getattr(snapshot, "data_feed", "unknown"),
+            "price_adjustment": getattr(snapshot, "price_adjustment", "unknown"),
+            "data_fingerprint": getattr(snapshot, "data_fingerprint", ""),
             "data_as_of": getattr(snapshot, "data_as_of", None) or snapshot.origin_date,
             "market_data_cache": getattr(snapshot, "market_data_cache", "unknown"),
             "schema_version": "deployable_v5",

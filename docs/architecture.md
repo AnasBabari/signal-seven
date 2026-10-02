@@ -174,7 +174,7 @@ single cost (~2.3s of GIL-bound scalar work). The startup warm-up
 triggered by `api.py`'s lifespan. For a bounded ticker list (default
 8, configurable up to 64), it:
 
-- Eagerly `import torch` so the request path never pays it.
+- Warms the active sklearn candidates without importing unused PyTorch weights.
 - Calls `train_and_forecast(ticker, frame)` for the price model.
 - Calls `build_volatility_inference_snapshot(ticker)` for the
   volatility model.

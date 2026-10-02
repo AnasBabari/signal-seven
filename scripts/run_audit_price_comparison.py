@@ -3,6 +3,7 @@
 # ruff: noqa: E402
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import sys
@@ -32,7 +33,13 @@ from research.price_forecasting.paired_validation import (
 
 
 def main():
-    output = ROOT / "artifacts" / "audit_price_comparison_20261002"
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--output-dir", type=Path, default=ROOT / "artifacts" / "audit_price_comparison_20261002"
+    )
+    output = parser.parse_args().output_dir.resolve()
+    if ROOT not in output.parents:
+        raise ValueError("Comparison output must stay within this repository")
     if output.exists():
         raise FileExistsError("Use a fresh artifact directory; existing evidence is preserved")
     # Frozen before scores are inspected: three cached assets, Ridge alpha100,

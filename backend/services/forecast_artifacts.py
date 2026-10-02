@@ -13,6 +13,7 @@ import json
 import os
 import platform
 import tempfile
+import time
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
@@ -62,7 +63,8 @@ def save(path: Path, key: str, payload: dict[str, Any]) -> None:
     atomic_write(path, json.dumps(manifest, sort_keys=True).encode())
 
 
-def load(path: Path, key: str) -> dict[str, Any] | None:
+def load(path: Path, key: str, *, timings: dict[str, float] | None = None) -> dict[str, Any] | None:
+    started = time.perf_counter()
     try:
         if path.stat().st_size > 16384:
             return None
@@ -86,7 +88,12 @@ def load(path: Path, key: str) -> dict[str, Any] | None:
         content = blob.read_bytes()
         if hashlib.sha256(content).hexdigest() != digest:
             return None
+        if timings is not None:
+            timings["lookup_ms"] = (time.perf_counter() - started) * 1000.0
+        t_load = time.perf_counter()
         value = joblib.load(io.BytesIO(content))
+        if timings is not None:
+            timings["model_load_ms"] = (time.perf_counter() - t_load) * 1000.0
         return value if isinstance(value, dict) else None
     except Exception:
         # Cache failures must not replace the existing learned training path.

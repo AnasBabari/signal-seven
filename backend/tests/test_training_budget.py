@@ -14,7 +14,7 @@ from services.training_budget import TrainingBusyError, training_slot
 def test_different_tickers_share_capacity_but_memory_hits_still_work(monkeypatch):
     monkeypatch.setattr(settings, "forecast_training_max_concurrency", 1)
     monkeypatch.setattr(settings, "forecast_training_coordination_database_url", None)
-    monkeypatch.setattr(sf, "_load_fitted_forecast", lambda key: None)
+    monkeypatch.setattr(sf, "_load_fitted_forecast", lambda key, timings=None: None)
     frame = pd.DataFrame({"Close": [100.0]}, index=pd.to_datetime(["2026-10-01"]))
     sf.clear_forecast_cache()
     fitted = []
@@ -104,3 +104,17 @@ def test_discovery_matches_actual_universe_and_evidence():
     assert price["supported_ticker_count"] == len(sf.SUPPORTED_TICKERS) == 286
     assert price["evaluated_series"] == "predicted_prices"
     assert price["midpoint_evaluation"] == "unavailable"
+
+
+def test_memory_hit_bypasses_a_busy_ticker_lock(monkeypatch):
+    frame = pd.DataFrame({"Close": [100.0]}, index=pd.to_datetime(["2026-10-01"]))
+
+    class BusyLock:
+        def acquire(self, **kwargs):
+            raise AssertionError("Memory reuse must not wait for a fitting lock")
+
+    monkeypatch.setattr(sf, "_training_locks", [BusyLock()])
+    with sf._cache_lock:
+        sf._cache[sf._forecast_cache_key("AAPL", frame, "ridge")] = {"ticker": "AAPL"}
+    assert sf.train_and_forecast("AAPL", frame, "ridge")["timing"]["cache_status"] == "memory_hit"
+    sf.clear_forecast_cache()

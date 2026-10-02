@@ -50,7 +50,7 @@ export function assertTickerIdentity(payload, ticker) {
 export function assertMarketIdentity(payload, expected) {
   if (!expected) return payload;
   assertTickerIdentity(payload, expected.ticker);
-  const asOf = payload.data_as_of || payload.evidence?.data_as_of || payload.asOf;
+  const asOf = payload.data_as_of || payload.evidence?.data_as_of || payload.as_of || payload.asOf;
   const expectedDate = expected.data_as_of || expected.asOf;
   if (asOf && expectedDate && asOf !== expectedDate) throw new Error('Market origins differ. Refresh the outlook.');
   const originPrice = payload.current_price;
@@ -60,6 +60,12 @@ export function assertMarketIdentity(payload, expected) {
   const fingerprint = payload.provenance?.data_fingerprint || payload.evidence?.data_fingerprint || payload.dataFingerprint;
   const expectedFingerprint = expected.provenance?.data_fingerprint || expected.dataFingerprint;
   if (fingerprint && expectedFingerprint && fingerprint !== expectedFingerprint) throw new Error('Market data identities differ. Refresh the outlook.');
+  for (const [name, received, wanted] of [
+    ['feed', payload.provenance?.data_feed || payload.evidence?.data_feed || payload.feed, expected.provenance?.data_feed || expected.feed],
+    ['adjustment', payload.provenance?.price_adjustment || payload.evidence?.price_adjustment || payload.adjustment, expected.provenance?.price_adjustment || expected.adjustment],
+  ]) {
+    if (received && wanted && received !== 'unknown' && wanted !== 'unknown' && received !== wanted) throw new Error(`Market ${name} identities differ. Refresh the outlook.`);
+  }
   return payload;
 }
 

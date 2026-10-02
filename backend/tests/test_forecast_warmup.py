@@ -1,7 +1,6 @@
 """Guards for the background forecast warm-up.
 
-Warm-up exists to move a one-time cost (PyTorch import plus model fitting,
-~9s measured) off the first request path. These tests pin the properties that
+Warm-up moves model fitting off the first request path. These tests pin the properties that
 make it safe: it must never run inside tests, never start twice, and must
 respect its configuration bounds.
 """
@@ -124,3 +123,21 @@ def test_default_tickers_are_bounded_and_real():
     defaults = forecast_warmup.DEFAULT_WARMUP_TICKERS
     assert 1 <= len(defaults) <= 16
     assert len(set(defaults)) == len(defaults)
+
+
+def test_auto_warmup_does_not_import_unused_torch(monkeypatch):
+    import builtins
+
+    imported = []
+    original = builtins.__import__
+
+    def observe(name, *args, **kwargs):
+        if name == "torch":
+            imported.append(name)
+        return original(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", observe)
+    monkeypatch.setattr(forecast_warmup, "_warm_one", lambda ticker: 0.0)
+    monkeypatch.setattr(forecast_warmup, "_warm_volatility", lambda ticker: 0.0)
+    forecast_warmup._warm_loop(("MSFT",))
+    assert imported == []

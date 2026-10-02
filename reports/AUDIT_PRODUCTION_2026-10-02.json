@@ -1,0 +1,884 @@
+{
+  "checked_at_utc": "2026-10-02T10:19:27.240129+00:00",
+  "operation": "public_GET_only_no_auth_no_collection_no_settlement",
+  "checks": {
+    "health": {
+      "url": "https://stock-predictor-lstm.onrender.com/health",
+      "error_type": "ReadTimeout",
+      "elapsed_seconds": 30.74
+    },
+    "ready": {
+      "url": "https://stock-predictor-lstm.onrender.com/ready",
+      "error_type": "ReadTimeout",
+      "elapsed_seconds": 30.74
+    },
+    "models": {
+      "url": "https://stock-predictor-lstm.onrender.com/models",
+      "error_type": "ReadTimeout",
+      "elapsed_seconds": 30.73
+    },
+    "frontend": {
+      "url": "https://stock-predictor-lstm-two.vercel.app",
+      "status": 200,
+      "elapsed_seconds": 0.74,
+      "body_sha256": "7ef772b5d2e2a8eaf487ea3d0927c40c74dfb293f508b6e8d471a7986be94614",
+      "html_prefix": "<!DOCTYPE html>\n<html lang=\"en\" data-theme=\"dark\">\n<head>\n    <meta charset=\"UTF-8\" />\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"/>\n    <title>Signal Seven \u2014 Stock Forecasts Made Simple</title>\n    <meta name=\"description\" content=\"Explore seven-day stock price estimates, recent company news, and past performance for US and UK stocks. Estimates are not financial advice.\" />\n    <link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">\n    <link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>\n    <link href=\"https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap\" rel=\"stylesheet\">\n  <script type=\"module\" crossorigin src=\"/assets/index-C1X8tGgu.js\"></script>\n  <link rel=\"stylesheet\" crossorigin href=\"/assets/index-DuhRnBvj.css\">\n</head>\n<body>\n    <div id=\"root\"></div>\n</body>\n</html>\n"
+    },
+    "us_history": {
+      "url": "https://stock-predictor-lstm.onrender.com/api/v1/history?ticker=MSFT",
+      "error_type": "ReadTimeout",
+      "elapsed_seconds": 30.28
+    },
+    "uk_history": {
+      "url": "https://stock-predictor-lstm.onrender.com/api/v1/history?ticker=BP.L",
+      "error_type": "ReadTimeout",
+      "elapsed_seconds": 30.46
+    },
+    "us_price": {
+      "url": "https://stock-predictor-lstm.onrender.com/api/v1/forecast?ticker=MSFT&days=7",
+      "error_type": "ReadTimeout",
+      "elapsed_seconds": 30.46
+    },
+    "uk_price": {
+      "url": "https://stock-predictor-lstm.onrender.com/api/v1/forecast?ticker=BP.L&days=7",
+      "status": 404,
+      "elapsed_seconds": 26.74,
+      "body_sha256": "7e7c057db754856368e83e2b2f239e22e7cbb8e2548b50e3f30fbab8266b5925",
+      "body": {
+        "detail": "No market data is available."
+      }
+    },
+    "us_volatility": {
+      "url": "https://stock-predictor-lstm.onrender.com/api/v1/volatility/forecast?ticker=MSFT&horizon=5&model=auto",
+      "error_type": "ReadTimeout",
+      "elapsed_seconds": 30.34
+    },
+    "uk_volatility": {
+      "url": "https://stock-predictor-lstm.onrender.com/api/v1/volatility/forecast?ticker=BP.L&horizon=5&model=auto",
+      "status": 404,
+      "elapsed_seconds": 0.68,
+      "body_sha256": "d9dbac0e3de56272ffd582e24f87a111fc67264f5cacfa983dea6f460e160095",
+      "body": {
+        "detail": "No market data is available for this ticker."
+      }
+    }
+  },
+  "vercel": {
+    "project_id": "prj_xVDiEtgqOpmZKeyzNEPC9tNSOOe4",
+    "project_name": "stock-predictor-lstm",
+    "deployment_id": "dpl_EFKhrMQGJH7QECRAFPHqHkEuFFDS",
+    "domain": "stock-predictor-lstm-two.vercel.app",
+    "target": "production",
+    "state": "READY",
+    "github_repository": "AnasBabari/stock-predictor-lstm",
+    "branch": "main",
+    "commit": "dc66d50d8215f412fcddd67da366504e862f7172",
+    "regions": [
+      "iad1"
+    ],
+    "verified_by": "connected_vercel_get_deployment"
+  },
+  "render_control_plane": {
+    "verified": false,
+    "blocker": "Connector requires a user-confirmed workspace. No workspace selected or mutated.",
+    "blueprint_name": "stock-predictor-backend",
+    "blueprint_region": "oregon",
+    "live_name_and_region": "unverified"
+  },
+  "warm_retry": {
+    "health": {
+      "url": "https://stock-predictor-lstm.onrender.com/health",
+      "status": 200,
+      "elapsed_seconds": 0.56,
+      "body": {
+        "status": "ok",
+        "version": "1.1.0",
+        "deployment": {
+          "provider": "render",
+          "environment": "production",
+          "commit": "dc66d50d8215",
+          "preview": false
+        }
+      }
+    },
+    "ready": {
+      "url": "https://stock-predictor-lstm.onrender.com/ready",
+      "status": 200,
+      "elapsed_seconds": 3.18,
+      "body": {
+        "status": "ready",
+        "version": "1.1.0",
+        "deployment": {
+          "provider": "render",
+          "environment": "production",
+          "commit": "dc66d50d8215",
+          "preview": false
+        },
+        "dependencies": {
+          "market_data": {
+            "status": "available",
+            "configured_providers": [
+              "alpaca"
+            ],
+            "last_provider": "alpaca",
+            "last_success_at": "2026-10-02T10:23:29.018538+00:00",
+            "last_success_session": "2026-10-01",
+            "required_session": "2026-10-01",
+            "fresh_cache_entries": 8,
+            "cache_persistence": "ephemeral",
+            "last_error": null,
+            "circuit": {
+              "status": "available",
+              "circuit": "closed",
+              "consecutive_failures": 0,
+              "last_error": null,
+              "checked_at_epoch": 1790936609.0215945,
+              "cooldown_remaining_seconds": 0.0,
+              "negative_cache_size": 1
+            }
+          },
+          "forecast_ledger": {
+            "status": "available",
+            "backend": "postgresql",
+            "durable": true,
+            "required": true
+          }
+        }
+      }
+    }
+  },
+  "frontend_bundle": {
+    "path": "/assets/index-C1X8tGgu.js",
+    "status": 200,
+    "sha256": "bc2fb60a9211ee1faf04ad834a4a4c8e649e5f28c1dc6e1ae3d6428b924241b9",
+    "render_url_references": [
+      "https://stock-predictor-lstm.onrender.com"
+    ]
+  },
+  "finished_at_utc": "2026-10-02T10:25:38.113697+00:00",
+  "warm_public_checks": {
+    "us_history": {
+      "url": "https://stock-predictor-lstm.onrender.com/api/v1/history?ticker=MSFT",
+      "status": 200,
+      "elapsed_seconds": 3.8,
+      "body": {
+        "ticker": "MSFT",
+        "as_of": "2026-10-01",
+        "provider": "alpaca",
+        "market_data_cache": "hit",
+        "first_date": "2020-10-12",
+        "intraday": null,
+        "intraday_session": null,
+        "daily_count": 1500,
+        "daily_sample": {
+          "first": [
+            {
+              "d": "2020-10-12",
+              "c": 210.51
+            }
+          ],
+          "last": [
+            {
+              "d": "2026-09-29",
+              "c": 508.92
+            },
+            {
+              "d": "2026-09-30",
+              "c": 512.91
+            },
+            {
+              "d": "2026-10-01",
+              "c": 512.71
+            }
+          ]
+        }
+      },
+      "canonical_payload_sha256": "f06e44f56eb31e4c3bc245fe8a32782e577dfade35dcf2f8dfb7d268de8aed9f",
+      "history_retention": "Count, boundary samples and canonical payload hash; full history is not needed for deployment verification."
+    },
+    "uk_history": {
+      "url": "https://stock-predictor-lstm.onrender.com/api/v1/history?ticker=BP.L",
+      "status": 200,
+      "elapsed_seconds": 5.31,
+      "body": {
+        "ticker": "BP.L",
+        "as_of": "2026-10-02",
+        "provider": "yahoo",
+        "market_data_cache": "miss",
+        "first_date": "2020-10-22",
+        "intraday": null,
+        "intraday_session": null,
+        "daily_count": 1500,
+        "daily_sample": {
+          "first": [
+            {
+              "d": "2020-10-22",
+              "c": 200.79034423828125
+            }
+          ],
+          "last": [
+            {
+              "d": "2026-09-30",
+              "c": 549.4000244140625
+            },
+            {
+              "d": "2026-10-01",
+              "c": 557.0999755859375
+            },
+            {
+              "d": "2026-10-02",
+              "c": 556.5
+            }
+          ]
+        }
+      },
+      "canonical_payload_sha256": "e2d342063578d279bd274241b1878ad636b6708c3e2ad634e5d1a77903989db7",
+      "history_retention": "Count, boundary samples and canonical payload hash; full history is not needed for deployment verification."
+    },
+    "us_price": {
+      "url": "https://stock-predictor-lstm.onrender.com/api/v1/forecast?ticker=MSFT&days=7",
+      "status": 200,
+      "elapsed_seconds": 5.9,
+      "body": {
+        "ticker": "MSFT",
+        "ticker_name": "Microsoft Corp.",
+        "exchange_mic": "XNAS",
+        "exchange_name": "NASDAQ",
+        "currency": "USD",
+        "currency_symbol": "$",
+        "forecast_days": 7,
+        "data_as_of": "2026-10-01",
+        "current_price": 512.71,
+        "historical_dates": [
+          "2026-05-26",
+          "2026-05-27",
+          "2026-05-28",
+          "2026-05-29",
+          "2026-06-01",
+          "2026-06-02",
+          "2026-06-03",
+          "2026-06-04",
+          "2026-06-05",
+          "2026-06-08",
+          "2026-06-09",
+          "2026-06-10",
+          "2026-06-11",
+          "2026-06-12",
+          "2026-06-15",
+          "2026-06-16",
+          "2026-06-17",
+          "2026-06-18",
+          "2026-06-22",
+          "2026-06-23",
+          "2026-06-24",
+          "2026-06-25",
+          "2026-06-26",
+          "2026-06-29",
+          "2026-06-30",
+          "2026-07-01",
+          "2026-07-02",
+          "2026-07-06",
+          "2026-07-07",
+          "2026-07-08",
+          "2026-07-09",
+          "2026-07-10",
+          "2026-07-13",
+          "2026-07-14",
+          "2026-07-15",
+          "2026-07-16",
+          "2026-07-17",
+          "2026-07-20",
+          "2026-07-21",
+          "2026-07-22",
+          "2026-07-23",
+          "2026-07-24",
+          "2026-07-27",
+          "2026-07-28",
+          "2026-07-29",
+          "2026-07-30",
+          "2026-07-31",
+          "2026-08-03",
+          "2026-08-04",
+          "2026-08-05",
+          "2026-08-06",
+          "2026-08-07",
+          "2026-08-10",
+          "2026-08-11",
+          "2026-08-12",
+          "2026-08-13",
+          "2026-08-14",
+          "2026-08-17",
+          "2026-08-18",
+          "2026-08-19",
+          "2026-08-20",
+          "2026-08-21",
+          "2026-08-24",
+          "2026-08-25",
+          "2026-08-26",
+          "2026-08-27",
+          "2026-08-28",
+          "2026-08-31",
+          "2026-09-01",
+          "2026-09-02",
+          "2026-09-03",
+          "2026-09-04",
+          "2026-09-08",
+          "2026-09-09",
+          "2026-09-10",
+          "2026-09-11",
+          "2026-09-14",
+          "2026-09-15",
+          "2026-09-16",
+          "2026-09-17",
+          "2026-09-18",
+          "2026-09-21",
+          "2026-09-22",
+          "2026-09-23",
+          "2026-09-24",
+          "2026-09-25",
+          "2026-09-28",
+          "2026-09-29",
+          "2026-09-30",
+          "2026-10-01"
+        ],
+        "historical_prices": [
+          415.31,
+          411.93,
+          426.17,
+          448.6,
+          459.61,
+          440.52,
+          426.78,
+          427.29,
+          415.85,
+          410.99,
+          402.35,
+          396.66,
+          389.52,
+          389.94,
+          399.3,
+          393.23,
+          378.34,
+          378.37,
+          366.52,
+          373.23,
+          364.77,
+          351.75,
+          370.97,
+          367.82,
+          372.22,
+          383.66,
+          389.06,
+          386.08,
+          388.01,
+          382.39,
+          383.52,
+          384.37,
+          390.25,
+          384.22,
+          394.87,
+          400.37,
+          393.27,
+          401.72,
+          396.83,
+          389.54,
+          380.83,
+          381.09,
+          388.42,
+          392.7,
+          390.27,
+          450.7,
+          463.83,
+          486.66,
+          491.9,
+          486.54,
+          499.1,
+          498.94,
+          505.2,
+          502.82,
+          491.52,
+          495.88,
+          494.42,
+          479.75,
+          480.91,
+          483.51,
+          481.205,
+          483.33,
+          487.32,
+          491.55,
+          496.36,
+          504.98,
+          513.67,
+          506.95,
+          501.19,
+          496.74,
+          510.15,
+          499.545,
+          493.92,
+          491.65,
+          492.49,
+          495.58,
+          505.72,
+          497.105,
+          490.45,
+          497.67,
+          493.1,
+          501.64,
+          498.0,
+          500.62,
+          497.585,
+          516.155,
+          509.36,
+          508.92,
+          512.91,
+          512.71
+        ],
+        "future_dates": [
+          "2026-10-02",
+          "2026-10-05",
+          "2026-10-06",
+          "2026-10-07",
+          "2026-10-08",
+          "2026-10-09",
+          "2026-10-12"
+        ],
+        "predicted_prices": [
+          514.5542511300238,
+          515.2578254218824,
+          517.260601385084,
+          519.1131059759701,
+          521.8506495780682,
+          523.7334953712034,
+          525.4454458326461
+        ],
+        "lower_prices": [
+          506.4550350430427,
+          503.669983869585,
+          501.9181717776985,
+          500.2674003382212,
+          502.4893739359636,
+          501.3987154101115,
+          503.38780129616987
+        ],
+        "upper_prices": [
+          522.6377176503765,
+          525.4216841630298,
+          531.2427950002242,
+          537.875050111422,
+          543.5023212756197,
+          545.8324549881536,
+          550.8668535705503
+        ],
+        "model": {
+          "name": "ridge",
+          "kind": "learned_historical_model",
+          "feature_version": "simple-price-v1",
+          "target": "direct_cumulative_log_returns_1_to_7_sessions",
+          "selection": "lowest validation MAE among learned candidates",
+          "candidate_validation_mae": {
+            "ridge": 0.021567147001676123,
+            "random_forest": 0.021606666644167476
+          }
+        },
+        "backtest": {
+          "split": "chronological_70_15_15_with_7_session_purge",
+          "test_start": "2025-10-27",
+          "test_end": "2026-09-22",
+          "test_samples": 227,
+          "metric_source": "untouched_chronological_test",
+          "mae_percent": 3.1879507774266216,
+          "rmse_percent": 4.893629695466199,
+          "direction_accuracy": 0.49968533668974197,
+          "persistence_mae_percent": 3.1166947000503393,
+          "relative_mae_vs_persistence": 1.0228627068846787,
+          "per_horizon": [
+            {
+              "day": 1,
+              "mae_percent": 1.4921014384670126,
+              "rmse_percent": 2.1597370060830134,
+              "direction_accuracy": 0.4669603524229075,
+              "relative_mae_vs_persistence": 1.0224910491029156
+            },
+            {
+              "day": 2,
+              "mae_percent": 2.2836091148112088,
+              "rmse_percent": 3.2447558520487134,
+              "direction_accuracy": 0.5066079295154186,
+              "relative_mae_vs_persistence": 1.0298505101974158
+            },
+            {
+              "day": 3,
+              "mae_percent": 2.8422243529171,
+              "rmse_percent": 4.097181296200544,
+              "direction_accuracy": 0.4801762114537445,
+              "relative_mae_vs_persistence": 1.0263955032132028
+            },
+            {
+              "day": 4,
+              "mae_percent": 3.3016527127168303,
+              "rmse_percent": 4.867094477739338,
+              "direction_accuracy": 0.5330396475770925,
+              "relative_mae_vs_persistence": 1.0121629632858455
+            },
+            {
+              "day": 5,
+              "mae_percent": 3.724150213842514,
+              "rmse_percent": 5.48348676758861,
+              "direction_accuracy": 0.5154185022026432,
+              "relative_mae_vs_persistence": 1.0152272971570924
+            },
+            {
+              "day": 6,
+              "mae_percent": 4.139431414620104,
+              "rmse_percent": 6.125148127741058,
+              "direction_accuracy": 0.4933920704845815,
+              "relative_mae_vs_persistence": 1.0203806506964908
+            },
+            {
+              "day": 7,
+              "mae_percent": 4.5324861946115815,
+              "rmse_percent": 6.661742020922605,
+              "direction_accuracy": 0.5022026431718062,
+              "relative_mae_vs_persistence": 1.0338674732243838
+            }
+          ]
+        },
+        "provenance": {
+          "data_provider": "alpaca",
+          "market_data_cache": "hit",
+          "calendar": "NYSE",
+          "completed_daily_bars_only": true
+        },
+        "news": {
+          "role": "context_only",
+          "used_by_model": false,
+          "reason": "Historical news coverage has not yet passed the same chronological backtest."
+        }
+      }
+    },
+    "us_volatility": {
+      "url": "https://stock-predictor-lstm.onrender.com/api/v1/volatility/forecast?ticker=MSFT&horizon=5&model=auto",
+      "status": 200,
+      "elapsed_seconds": 2.49,
+      "body": {
+        "ticker": "MSFT",
+        "as_of": "2026-10-01",
+        "horizon": 5,
+        "current_price": 512.71,
+        "historical_dates": [
+          "2026-05-26",
+          "2026-05-27",
+          "2026-05-28",
+          "2026-05-29",
+          "2026-06-01",
+          "2026-06-02",
+          "2026-06-03",
+          "2026-06-04",
+          "2026-06-05",
+          "2026-06-08",
+          "2026-06-09",
+          "2026-06-10",
+          "2026-06-11",
+          "2026-06-12",
+          "2026-06-15",
+          "2026-06-16",
+          "2026-06-17",
+          "2026-06-18",
+          "2026-06-22",
+          "2026-06-23",
+          "2026-06-24",
+          "2026-06-25",
+          "2026-06-26",
+          "2026-06-29",
+          "2026-06-30",
+          "2026-07-01",
+          "2026-07-02",
+          "2026-07-06",
+          "2026-07-07",
+          "2026-07-08",
+          "2026-07-09",
+          "2026-07-10",
+          "2026-07-13",
+          "2026-07-14",
+          "2026-07-15",
+          "2026-07-16",
+          "2026-07-17",
+          "2026-07-20",
+          "2026-07-21",
+          "2026-07-22",
+          "2026-07-23",
+          "2026-07-24",
+          "2026-07-27",
+          "2026-07-28",
+          "2026-07-29",
+          "2026-07-30",
+          "2026-07-31",
+          "2026-08-03",
+          "2026-08-04",
+          "2026-08-05",
+          "2026-08-06",
+          "2026-08-07",
+          "2026-08-10",
+          "2026-08-11",
+          "2026-08-12",
+          "2026-08-13",
+          "2026-08-14",
+          "2026-08-17",
+          "2026-08-18",
+          "2026-08-19",
+          "2026-08-20",
+          "2026-08-21",
+          "2026-08-24",
+          "2026-08-25",
+          "2026-08-26",
+          "2026-08-27",
+          "2026-08-28",
+          "2026-08-31",
+          "2026-09-01",
+          "2026-09-02",
+          "2026-09-03",
+          "2026-09-04",
+          "2026-09-08",
+          "2026-09-09",
+          "2026-09-10",
+          "2026-09-11",
+          "2026-09-14",
+          "2026-09-15",
+          "2026-09-16",
+          "2026-09-17",
+          "2026-09-18",
+          "2026-09-21",
+          "2026-09-22",
+          "2026-09-23",
+          "2026-09-24",
+          "2026-09-25",
+          "2026-09-28",
+          "2026-09-29",
+          "2026-09-30",
+          "2026-10-01"
+        ],
+        "historical_prices": [
+          415.31,
+          411.93,
+          426.17,
+          448.6,
+          459.61,
+          440.52,
+          426.78,
+          427.29,
+          415.85,
+          410.99,
+          402.35,
+          396.66,
+          389.52,
+          389.94,
+          399.3,
+          393.23,
+          378.34,
+          378.37,
+          366.52,
+          373.23,
+          364.77,
+          351.75,
+          370.97,
+          367.82,
+          372.22,
+          383.66,
+          389.06,
+          386.08,
+          388.01,
+          382.39,
+          383.52,
+          384.37,
+          390.25,
+          384.22,
+          394.87,
+          400.37,
+          393.27,
+          401.72,
+          396.83,
+          389.54,
+          380.83,
+          381.09,
+          388.42,
+          392.7,
+          390.27,
+          450.7,
+          463.83,
+          486.66,
+          491.9,
+          486.54,
+          499.1,
+          498.94,
+          505.2,
+          502.82,
+          491.52,
+          495.88,
+          494.42,
+          479.75,
+          480.91,
+          483.51,
+          481.205,
+          483.33,
+          487.32,
+          491.55,
+          496.36,
+          504.98,
+          513.67,
+          506.95,
+          501.19,
+          496.74,
+          510.15,
+          499.545,
+          493.92,
+          491.65,
+          492.49,
+          495.58,
+          505.72,
+          497.105,
+          490.45,
+          497.67,
+          493.1,
+          501.64,
+          498.0,
+          500.62,
+          497.585,
+          516.155,
+          509.36,
+          508.92,
+          512.91,
+          512.71
+        ],
+        "forecast": {
+          "future_dates": [
+            "2026-10-02",
+            "2026-10-05",
+            "2026-10-06",
+            "2026-10-07",
+            "2026-10-08"
+          ],
+          "price_quantiles": {
+            "p05": [
+              492.70905284929574,
+              484.65468510026517,
+              478.56374215331806,
+              473.48834772025134,
+              469.061455556459
+            ],
+            "p10": [
+              497.0584770050777,
+              490.7161911916753,
+              485.90451073056687,
+              481.8847488104529,
+              478.370831325573
+            ],
+            "p25": [
+              504.4120221805457,
+              501.01434760411735,
+              498.4227466784072,
+              496.24834335251364,
+              494.34051705983006
+            ],
+            "p50": [
+              512.71,
+              512.71,
+              512.71,
+              512.71,
+              512.71
+            ],
+            "p75": [
+              521.1444861357996,
+              524.6786750859901,
+              527.4067964430409,
+              529.7177262580145,
+              531.7620850976791
+            ],
+            "p90": [
+              528.8543627379172,
+              535.6895672458494,
+              540.9942453606112,
+              545.5070839010913,
+              549.5141569806398
+            ],
+            "p95": [
+              533.5228621837484,
+              542.3893592313408,
+              549.2926457762936,
+              555.1805981407405,
+              560.4202626032215
+            ]
+          },
+          "expected_cumulative_variance_path": [
+            0.0005852305350045385,
+            0.001170461070009077,
+            0.0017556916050136154,
+            0.002340922140018154,
+            0.0029261526750226923
+          ],
+          "expected_cumulative_variance": 0.0029261526750226923,
+          "expected_annualized_volatility": 0.3840287682207463,
+          "predicted_volatility": 0.3840287682207463,
+          "volatility_unit": "annualized_sigma",
+          "model": "rolling_mean",
+          "requested_model": "auto",
+          "baseline": true
+        },
+        "evidence": {
+          "model_status": "baseline",
+          "model_family": "statistical_baseline",
+          "model_name": "rolling_mean",
+          "requested_model": "auto",
+          "baseline": true,
+          "model_version": "deployable_v5",
+          "feature_set_version": "deployable_feature_columns_v5",
+          "model_policy_version": "empirical_volatility_benchmark_v3",
+          "auto_model_policy": {
+            "1": "garch_11",
+            "5": "rolling_mean",
+            "10": "rolling_mean",
+            "20": "rolling_mean"
+          },
+          "selected_horizon": 5,
+          "scenario_label": "gaussian_model_implied_price_range",
+          "scenario_description": "Price dispersion implied by forecast volatility under a zero-drift Gaussian log-return reference model; not a point price forecast or calibrated confidence interval.",
+          "metric_source": "baseline_definition",
+          "interval_method": "gaussian_reference_scenario",
+          "interval_nominal_coverage": 0.9,
+          "interval_scope": "pointwise_marginal_reference_not_empirically_calibrated",
+          "target": "future_realized_volatility_close_to_close",
+          "target_definition": "sqrt(252 / H * sum(next H close-to-close log returns squared))",
+          "snapshot_id": "5c0dd364e5539be268afb609d37053245c1474cfe5c14597127036cffa47afc0",
+          "data_provider": "alpaca",
+          "data_as_of": "2026-10-01",
+          "market_data_cache": "hit",
+          "schema_version": "deployable_v5",
+          "feature_count": 17,
+          "feature_names": [
+            "log_return_1d",
+            "log_return_5d",
+            "log_return_20d",
+            "Vol_C2C_5",
+            "Vol_C2C_20",
+            "Vol_C2C_60",
+            "EWMA_Var",
+            "Vol_Parkinson_20",
+            "Vol_GarmanKlass_20",
+            "Vol_RogersSatchell_20",
+            "vol_ratio_5_20",
+            "vol_ratio_20_60",
+            "norm_range_1d",
+            "norm_range_5d",
+            "norm_range_20d",
+            "volume_log_ratio_20d",
+            "volume_zscore_20d"
+          ],
+          "window_size": 60,
+          "news_status": "not_used",
+          "code_commit": "dc66d50d",
+          "forecast_fingerprint": "5afbc73ac55b724260986a336e658d2d2ca73c09401ab2e51982ac751518420c",
+          "ledger_write": "disabled_public_preview"
+        }
+      }
+    }
+  }
+}

@@ -72,8 +72,8 @@ for (const [name, overrides] of [
   test(`rejects ${name} while keeping history visible`, async ({ page }) => {
     await installFixtures(page, null, overrides);
     await submit(page);
-    await expect(page.getByText(/Day 7 estimate:/)).toHaveCount(0);
-    await expect(page.locator('.chart-mismatch-alert')).toBeVisible();
+    await expect(page.getByText(/Range midpoint — experimental:/)).toHaveCount(0);
+    await expect(page.getByRole('alert').filter({ hasText: /invalid|does not match|origins differ|prices differ/i }).first()).toBeVisible();
     await expect(page.locator('#chartContainer canvas')).toBeVisible();
     await expect(page.locator('.t212-price')).toHaveText('$450.00');
   });

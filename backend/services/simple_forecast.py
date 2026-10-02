@@ -388,15 +388,21 @@ def _infer_artifact(payload: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _load_fitted_forecast(cache_key: str) -> dict[str, Any] | None:
+def _load_fitted_forecast(cache_key: str, timings=None) -> dict[str, Any] | None:
     path = _disk_cache_path(cache_key)
     if path is None:
         return None
-    payload = forecast_artifacts.load(path.with_suffix(".artifact.json"), cache_key)
+    payload = forecast_artifacts.load(
+        path.with_suffix(".artifact.json"), cache_key, timings=timings
+    )
     if payload is None:
         return None
     try:
-        return _infer_artifact(payload)
+        t_infer = time.perf_counter()
+        value = _infer_artifact(payload)
+        if timings is not None:
+            timings["infer_ms"] = (time.perf_counter() - t_infer) * 1000.0
+        return value
     except Exception:
         logger.warning("Ignoring invalid fitted forecast artifact")
         return None
@@ -646,6 +652,12 @@ def train_and_forecast(
     # Bounded striped locks prevent same-key stampedes without an unbounded lock registry.
     # This coordinates threads in one worker; disk cache also reuses completed work after restart.
     symbol = ticker.strip().upper()
+    cache_started = time.perf_counter()
+    key = _forecast_cache_key(symbol, frame, model_name.strip().lower())
+    with _cache_lock:
+        cached = _cache.get(key)
+        if cached is not None:
+            return _with_timing(cached, cache_started, "memory_hit")
     slot = int(hashlib.sha256(symbol.encode()).hexdigest(), 16) % len(_training_locks)
     if not _training_locks[slot].acquire(timeout=2.0):
         from services.training_budget import TrainingBusyError
@@ -673,6 +685,8 @@ def _train_and_forecast_locked(
     if symbol not in SUPPORTED_TICKERS:
         raise ValueError(f"Ticker must be one of: {', '.join(SUPPORTED_TICKERS)}")
     normalized_model = model_name.strip().lower()
+    if normalized_model not in {"auto", "ridge", "random_forest", "gpu_lstm", "lstm"}:
+        raise ValueError("Unsupported explicit price model request.")
     frame = frame.loc[~frame.index.duplicated(keep="last")].sort_index()
     data_as_of = pd.Timestamp(frame.index[-1]).date().isoformat()
     cache_key = _forecast_cache_key(symbol, frame, normalized_model)
@@ -689,7 +703,8 @@ def _train_and_forecast_locked(
             )
             return _with_timing(cached, started, "memory_hit")
     t_artifact = time.perf_counter()
-    disk_cached = _load_fitted_forecast(cache_key)
+    artifact_timings = {}
+    disk_cached = _load_fitted_forecast(cache_key, artifact_timings)
     lookup_ms = (time.perf_counter() - t_artifact) * 1000.0
     if disk_cached is not None:
         with _cache_lock:
@@ -701,7 +716,7 @@ def _train_and_forecast_locked(
             normalized_model,
             (time.perf_counter() - started) * 1000.0,
         )
-        return _with_timing(disk_cached, started, "artifact_hit", lookup_ms=lookup_ms)
+        return _with_timing(disk_cached, started, "artifact_hit", **artifact_timings)
 
     # Only cache misses consume scarce fitting capacity. The context releases on errors.
     with training_slot():

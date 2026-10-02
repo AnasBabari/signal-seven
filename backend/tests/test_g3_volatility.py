@@ -297,6 +297,7 @@ def test_g3_failure_falls_back_to_baseline_explicitly(monkeypatch, tmp_path):
     assert body["forecast"]["model"] == "rolling_mean"
     assert body["evidence"]["model_status"] == "baseline"
     assert body["evidence"]["fallback_used"]
+    assert "trailing_annualized_volatility_60d" in body["evidence"]
     assert len(body["forecast"]["price_quantiles"]["p50"]) == 5
 
 

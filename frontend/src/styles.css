@@ -2829,3 +2829,10 @@ strong.mono.flat {
   .t212-chart-wrap, .t212-canvas-viewport { touch-action: pan-y; }
   .stock-suggestions li { font-size: .8rem; }
 }
+
+@media (max-width: 600px) {
+  .range-pill, .toolbar-btn, .retry-action-btn, .info-icon-btn { min-height: 44px; min-width: 44px; }
+  .chart-data-access summary, .horizon-expandable-details summary, .outlook-disclosure summary { min-height: 44px; display: flex; align-items: center; }
+  .chart-data-access input[type="range"] { min-height: 44px; }
+  .stock-suggestions li { min-height: 44px; align-items: center; }
+}

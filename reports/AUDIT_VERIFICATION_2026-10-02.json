@@ -1,0 +1,24 @@
+{
+  "verified_at_utc": "2026-10-02T10:35:36.831687+00:00",
+  "repository": "C:\\Users\\Babar\\stock-predictor-lstm",
+  "initial_commit": "e84ae2f",
+  "backend_research_tests": 300,
+  "frontend_tests": 163,
+  "chromium_browser_tests": 14,
+  "ruff_check": "passed",
+  "ruff_format_check": "passed",
+  "production_build": "passed",
+  "local_evidence_scope": "fixture UI and retrospective development comparison",
+  "scientific_superiority": "not_established",
+  "live_published_repair": false,
+  "production_report": "reports/AUDIT_PRODUCTION_2026-10-02.json",
+  "verification_doc": "docs/AUDIT_REPAIR_2026-10-02.md",
+  "limits": [
+    "Render control-plane workspace not confirmed; actual service name/region unverified",
+    "No independent holdout or prospective midpoint/coverage evaluation",
+    "No push, deployment, authenticated live collection, settlement or ledger export"
+  ],
+  "preserved_user_paths": [
+    "data/options/"
+  ]
+}
