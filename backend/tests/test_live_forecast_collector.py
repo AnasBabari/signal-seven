@@ -16,7 +16,6 @@ from scripts.collect_live_forecasts import (
     run_preflight,
     write_manifest,
 )
-
 from services.live_collection import (
     LIVE_COLLECTION_ITEMS_V1,
     LIVE_EXPECTED_RECORD_COUNT,

@@ -66,17 +66,17 @@ describe('PriceChart', () => {
   it('defaults to 1M and hides 5Y for a 2024 IPO', () => {
     usePriceHistory.mockReturnValue({ history: historyFixture(500, true), loading: false, error: '', retry: vi.fn() });
     render(<PriceChart ticker="MSFT" currencySymbol="$" />);
-    expect(screen.getByRole('tab', { name: '1M' })).toHaveAttribute('aria-selected', 'true');
-    expect(screen.queryByRole('tab', { name: '5Y' })).toBeNull();
-    expect(screen.getByRole('tab', { name: '1Y' })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: 'MAX' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '1M' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.queryByRole('button', { name: '5Y' })).toBeNull();
+    expect(screen.getByRole('button', { name: '1Y' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'MAX' })).toBeInTheDocument();
   });
 
   it('hides 24H when intraday bars failed to load', () => {
     usePriceHistory.mockReturnValue({ history: historyFixture(3000, false), loading: false, error: '', retry: vi.fn() });
     render(<PriceChart ticker="MSFT" currencySymbol="$" />);
-    expect(screen.queryByRole('tab', { name: '24H' })).toBeNull();
-    expect(screen.getByRole('tab', { name: '5Y' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '24H' })).toBeNull();
+    expect(screen.getByRole('button', { name: '5Y' })).toBeInTheDocument();
   });
 
   it('shows header price and period change', () => {
@@ -89,14 +89,14 @@ describe('PriceChart', () => {
   it('switches ranges and overlays the forecast path', () => {
     usePriceHistory.mockReturnValue({ history: historyFixture(300, true), loading: false, error: '', retry: vi.fn() });
     render(<PriceChart ticker="MSFT" currencySymbol="$" forecast={forecastFixture} />);
-    fireEvent.click(screen.getByRole('tab', { name: '1M' }));
-    expect(screen.getByRole('tab', { name: '1M' })).toHaveAttribute('aria-selected', 'true');
+    fireEvent.click(screen.getByRole('button', { name: '1M' }));
+    expect(screen.getByRole('button', { name: '1M' })).toHaveAttribute('aria-pressed', 'true');
     const labels = lastChartProps.data.datasets.map((ds) => ds.label);
     expect(labels).toContain('Price');
-    expect(labels).toContain('7-day estimate');
+    expect(labels).toContain('Range midpoint — experimental');
     expect(lastChartProps.data.labels.length).toBe(22 + 7);
     // Honesty: estimate is dashed, detached from history, inside a marked region.
-    const estimate = lastChartProps.data.datasets.find((ds) => ds.label === '7-day estimate');
+    const estimate = lastChartProps.data.datasets.find((ds) => ds.label === 'Range midpoint — experimental');
     expect(estimate.borderDash).toEqual([6, 4]);
     expect(estimate.data.slice(0, 22).every((v) => v == null)).toBe(true);
     expect(lastChartProps.data.forecastSplitIndex).toBe(21);
@@ -106,7 +106,7 @@ describe('PriceChart', () => {
   it('wheel zoom reveals a reset control and double-click clears it', () => {
     usePriceHistory.mockReturnValue({ history: historyFixture(300, true), loading: false, error: '', retry: vi.fn() });
     const { container } = render(<PriceChart ticker="MSFT" currencySymbol="$" />);
-    fireEvent.click(screen.getByRole('tab', { name: '1M' }));
+    fireEvent.click(screen.getByRole('button', { name: '1M' }));
     expect(screen.queryByRole('button', { name: 'Reset' })).toBeNull();
     fireEvent.wheel(container.querySelector('.t212-chart-wrap'), { clientX: 200, deltaY: -100 });
     expect(screen.getByRole('button', { name: 'Reset' })).toBeInTheDocument();
@@ -150,10 +150,10 @@ describe('PriceChart', () => {
     };
     render(<PriceChart ticker="MSFT" currencySymbol="$" forecast={fallbackForecast} />);
     expect(screen.queryByRole('button', { name: 'Retry chart' })).toBeNull();
-    expect(screen.getByRole('tab', { name: 'MAX' })).toHaveAttribute('aria-selected', 'true');
-    expect(screen.queryByRole('tab', { name: '5D' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'MAX' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.queryByRole('button', { name: '5D' })).toBeNull();
     const labels = lastChartProps.data.datasets.map((ds) => ds.label);
-    expect(labels).toContain('7-day estimate');
+    expect(labels).toContain('Range midpoint — experimental');
   });
 
   it('removes automatic uncertainty and volatility bands from this price view by default', () => {
@@ -180,7 +180,7 @@ describe('PriceChart', () => {
       />,
     );
     expect(screen.getByRole('button', { name: 'Retry chart' })).toBeInTheDocument();
-    expect(screen.queryByRole('tab', { name: 'MAX' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'MAX' })).toBeNull();
     expect(screen.queryByTestId('mock-chart')).toBeNull();
   });
 
@@ -219,4 +219,15 @@ describe('PriceChart', () => {
     expect(container.querySelectorAll('.t212-skeleton-bars i').length).toBeGreaterThan(0);
     expect(screen.queryByTestId('mock-chart')).toBeNull();
   });
+});
+
+
+it('offers keyboard date inspection with full year and accessible numerical data', () => {
+  usePriceHistory.mockReturnValue({ history: historyFixture(300, false), loading: false, error: '', retry: vi.fn() });
+  render(<PriceChart ticker="MSFT" />);
+  const slider = screen.getByRole('slider', { name: 'Inspect chart date' });
+  fireEvent.keyDown(slider, { key: 'End' });
+  expect(screen.getByRole('status')).toHaveTextContent('2024-06-01');
+  expect(screen.getByText('Price data table')).toBeInTheDocument();
+  expect(lastChartProps['aria-label']).toContain('MSFT historical closes');
 });

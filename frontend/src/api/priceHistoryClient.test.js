@@ -3,7 +3,7 @@ import { clearPriceHistoryCache, fetchPriceHistory } from './priceHistoryClient'
 
 const payload = {
   ticker: 'MSFT',
-  as_of: '2024-06-01',
+  as_of: '2024-01-03',
   provider: 'alpaca',
   market_data_cache: 'miss',
   first_date: '2024-01-02',
@@ -52,4 +52,37 @@ describe('priceHistoryClient', () => {
     })));
     await expect(fetchPriceHistory('MSFT')).rejects.toThrow('down');
   });
+});
+
+
+it('distinguishes deadline from parent cancellation', async () => {
+  vi.useFakeTimers();
+  vi.stubGlobal('fetch', vi.fn((url, { signal }) => new Promise((resolve, reject) => {
+    signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+  })));
+  clearPriceHistoryCache();
+  const result = fetchPriceHistory('AAPL', { timeoutMs: 10 });
+  const assertion = expect(result).rejects.toMatchObject({ name: 'TimeoutError' });
+  await vi.advanceTimersByTimeAsync(10);
+  await assertion;
+  const controller = new AbortController();
+  const cancelled = fetchPriceHistory('AAPL', { signal: controller.signal });
+  controller.abort();
+  await expect(cancelled).rejects.toMatchObject({ name: 'AbortError' });
+  vi.useRealTimers();
+});
+
+
+it('refreshes expired data and bypasses fresh data on explicit retry', async () => {
+  vi.useFakeTimers();
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => payload }));
+  clearPriceHistoryCache();
+  await fetchPriceHistory('MSFT');
+  await fetchPriceHistory('MSFT');
+  expect(fetch).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(60_001);
+  await fetchPriceHistory('MSFT');
+  await fetchPriceHistory('MSFT', { forceRefresh: true });
+  expect(fetch).toHaveBeenCalledTimes(3);
+  vi.useRealTimers();
 });

@@ -84,14 +84,8 @@ def _warm_volatility(ticker: str) -> float:
 
 
 def _warm_loop(tickers: Iterable[str]) -> None:
-    # Eager, guarded import: this is the single largest fixed cost, and doing it
-    # here means no user request ever pays it. Guarded because torch is an
-    # optional dependency in some CI configurations.
-    try:
-        import torch  # noqa: F401
-    except Exception as err:  # pragma: no cover - environment dependent
-        logger.info("forecast_warmup: torch unavailable (%s); continuing", err)
-
+    # Auto price serving uses sklearn. Loading torch here wastes memory on a
+    # small worker and does not warm any active auto candidate.
     from config import settings
 
     warm_volatility = bool(getattr(settings, "forecast_warmup_volatility", True))

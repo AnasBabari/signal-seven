@@ -33,13 +33,14 @@ def test_leave_one_out_market_isolation_and_future_causality():
     source = frames()
     original = build_market_context(source)
     changed = {s: f.copy() for s, f in source.items()}
-    changed["A"].loc[:, "Close"] *= np.exp(np.arange(500) * 0.01)
+    ohlc = ["Open", "High", "Low", "Close"]
+    changed["A"].loc[:, ohlc] = changed["A"][ohlc].mul(np.exp(np.arange(500) * 0.01), axis=0)
     modified = build_market_context(changed)
     pd.testing.assert_series_equal(original["A"].market_return_1d, modified["A"].market_return_1d)
     pd.testing.assert_frame_equal(original["D.L"], modified["D.L"])
     changed = {s: f.copy() for s, f in source.items()}
     for f in changed.values():
-        f.iloc[70:, f.columns.get_loc("Close")] *= 3
+        f.loc[f.index[70:], ohlc] *= 3
     modified = build_market_context(changed)
     for s in source:
         pd.testing.assert_frame_equal(original[s].iloc[:70], modified[s].iloc[:70])

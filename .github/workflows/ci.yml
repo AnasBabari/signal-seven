@@ -14,8 +14,8 @@ jobs:
   backend-and-research:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - name: Install backend dependencies
@@ -38,8 +38,8 @@ jobs:
   frontend:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
         with:
           node-version: "22.x"
           cache: npm
@@ -53,3 +53,17 @@ jobs:
       - name: Build Frontend Bundle
         run: npm run build
         working-directory: frontend
+      - name: Install browser contract runtime
+        run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - name: Verify public UI contracts with local fixtures
+        run: npm run e2e -- e2e/server-contract.spec.js e2e/audit-contract.spec.js
+        working-directory: frontend
+      - name: Preserve browser failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: browser-contract-failures
+          path: |
+            frontend/playwright-report/
+            frontend/test-results/

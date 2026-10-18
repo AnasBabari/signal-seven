@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
 import threading
 from typing import Any
 
@@ -11,14 +10,12 @@ import yfinance as default_yf  # type: ignore[import-untyped]
 from cachetools import TTLCache
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from calendars import resolve_calendar
 from config import settings
 from market_data.base import (
     MarketDataProviderError,
     MarketDataServiceError,
     MarketDataSymbolNotFound,
 )
-from market_data.yahoo import YahooProvider as _YahooProvider
 from routes.common import limiter, validate_ticker
 
 logger = logging.getLogger(__name__)
@@ -37,19 +34,9 @@ _info_cache: TTLCache = TTLCache(
 
 
 def _fetch_history_daily(symbol: str):
-    """Daily closes for the chart, with provider routing.
-
-    US/NYSE/NASDAQ tickers resolve through the shared forecast
-    ``data_pipeline.market_data_service`` so a chart load warms the exact
-    cache entries the forecast endpoints read next (one upstream fetch serves
-    both features). LSE tickers are routed to Yahoo directly because the
-    shared provider chain targets US equities.
-    """
+    """Use the same exchange-aware completed daily bars as every forecast."""
     import data_pipeline as dp
 
-    cal_name, _ = resolve_calendar(symbol)
-    if cal_name == "LSE":
-        return _YahooProvider().fetch_daily_bars(symbol, years=LSE_HISTORY_YEARS)
     return dp.market_data_service.fetch_daily_bars(symbol, years=dp.HISTORICAL_YEARS)
 
 
@@ -90,6 +77,10 @@ def history(
             "ticker": symbol,
             "as_of": result.data_as_of,
             "provider": result.provider,
+            "feed": result.feed,
+            "adjustment": result.adjustment,
+            "data_fingerprint": result.data_fingerprint,
+            "completed_daily_bars_only": True,
             "market_data_cache": result.cache_status or "unknown",
             "first_date": daily[0]["d"] if daily else None,
             "daily": daily,
@@ -125,17 +116,22 @@ def search(
 
     yf = getattr(api, "yf", default_yf)
 
+    from services.simple_forecast import SUPPORTED_TICKERS, get_ticker_meta
+
     exact_symbol = query.strip().upper()
+    local = [
+        {"ticker": ticker, "name": get_ticker_meta(ticker)["name"], "type": "EQUITY"}
+        for ticker in SUPPORTED_TICKERS
+        if exact_symbol in ticker or exact_symbol in get_ticker_meta(ticker)["name"].upper()
+    ]
+    if local:
+        return {"results": sorted(local, key=lambda item: item["ticker"] != exact_symbol)[:8]}
     fallback = []
-    if re.fullmatch(r"[A-Z0-9.\-]{1,12}", exact_symbol):
-        fallback.append({"ticker": exact_symbol, "name": exact_symbol, "type": "SYMBOL"})
-    if fallback and query.strip() == exact_symbol:
-        return {"results": fallback}
     try:
         results = yf.Search(query, max_results=8)
         suggestions = []
         for r in results.quotes:
-            if r.get("quoteType") in ("EQUITY", "ETF"):
+            if r.get("quoteType") in ("EQUITY", "ETF") and r.get("symbol") in SUPPORTED_TICKERS:
                 suggestions.append(
                     {
                         "ticker": r.get("symbol", ""),

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from market_data.base import MarketDataResult
+from market_data.base import MarketDataProviderError, MarketDataResult
 from market_data.normalization import REQUIRED_OHLCV, normalize_daily_bars
 
 MAX_CACHE_FILE_BYTES = 25 * 1024 * 1024
@@ -39,16 +39,20 @@ class MarketDataCache:
             raise RuntimeError("market-data cache has no directory")
         return self.directory / f"{self._identity(provider, symbol)}.json"
 
-    def load(self, provider: str, symbol: str, *, required_session: str) -> MarketDataResult | None:
+    def load(
+        self, provider: str, symbol: str, *, required_session: str, namespace: str | None = None
+    ) -> MarketDataResult | None:
         if not self.enabled:
             return None
-        path = self._path(provider, symbol)
+        path = self._path(namespace or provider, symbol)
         with self._lock:
             try:
                 if path.stat().st_size > MAX_CACHE_FILE_BYTES:
                     return None
                 payload = json.loads(path.read_text(encoding="utf-8"))
                 if payload.get("provider") != provider or payload.get("symbol") != symbol.upper():
+                    return None
+                if payload.get("schema_version") != 2:
                     return None
                 data_as_of = str(payload["data_as_of"])
                 # A cache entry from a later calendar date can contain an
@@ -63,21 +67,29 @@ class MarketDataCache:
                     index=[row[0] for row in rows],
                 )
                 normalized = normalize_daily_bars(frame, provider=provider, symbol=symbol)
-            except (OSError, ValueError, KeyError, TypeError):
+                if normalized.index[-1].date().isoformat() != data_as_of:
+                    return None
+            except (OSError, ValueError, KeyError, TypeError, MarketDataProviderError):
                 return None
         return MarketDataResult(
             frame=normalized,
             provider=provider,
             data_as_of=data_as_of,
             cache_status="hit",
+            feed=payload.get("feed", "unknown"),
+            adjustment=payload.get("adjustment", "unknown"),
+            data_fingerprint=payload.get("data_fingerprint", ""),
         )
 
-    def save(self, symbol: str, result: MarketDataResult) -> None:
+    def save(self, symbol: str, result: MarketDataResult, *, namespace: str | None = None) -> None:
         if not self.enabled:
             return
-        path = self._path(result.provider, symbol)
+        path = self._path(namespace or result.provider, symbol)
         payload = {
-            "schema_version": 1,
+            "schema_version": 2,
+            "feed": result.feed,
+            "adjustment": result.adjustment,
+            "data_fingerprint": result.data_fingerprint,
             "provider": result.provider,
             "symbol": symbol.upper(),
             "data_as_of": result.data_as_of,

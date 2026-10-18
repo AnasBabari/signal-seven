@@ -10,6 +10,7 @@ benchmark is being rebuilt.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import secrets
 from dataclasses import dataclass
@@ -19,7 +20,12 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
-from data_pipeline import MarketDataUnavailable, MarketTransportError, UnknownTickerError
+from data_pipeline import (
+    MarketDataUnavailable,
+    MarketTransportError,
+    UnknownTickerError,
+    _download_ohlcv,
+)
 from features.market import MarketContextUnavailable
 from routes.common import limiter, validate_ticker
 from services.forecast_ledger import (
@@ -130,8 +136,18 @@ def _prepare_forecast(symbol: str, horizon: int, requested_model: str) -> _Prepa
     p05 = quantiles.get("p05", [snapshot.origin_close])[-1]
     p95 = quantiles.get("p95", [snapshot.origin_close])[-1]
     pred_vol = float(forecast_result.get("forecast", {}).get("predicted_volatility", 0.0))
-    recent_values = snapshot.baseline_candidates.get("rolling_c2c_20", [pred_vol])
-    recent_vol = float(recent_values[0])
+    recent_values = snapshot.baseline_candidates["rolling_c2c_20"]
+    recent_vol = math.sqrt(252.0 * float(recent_values[0]))
+    evidence["volatility_units"] = "annualized_sigma_fraction"
+    evidence.update(
+        {
+            "data_fingerprint": getattr(snapshot, "data_fingerprint", ""),
+            "data_feed": getattr(snapshot, "data_feed", "unknown"),
+            "price_adjustment": getattr(snapshot, "price_adjustment", "unknown"),
+            "feature_origin": snapshot.origin_date,
+        }
+    )
+    evidence["ledger_metric_version"] = "annualized_sigma_v1"
     active_model = str(forecast_result.get("forecast", {}).get("model", requested_model))
     record_kwargs = {
         "forecast_date": snapshot.origin_date,
@@ -145,11 +161,15 @@ def _prepare_forecast(symbol: str, horizon: int, requested_model: str) -> _Prepa
         "lower_scenario_price": float(p05),
         "upper_scenario_price": float(p95),
         "record_source": "live",
-        "model_version": VOLATILITY_MODEL_VERSION,
+        "model_version": VOLATILITY_MODEL_VERSION + ":annualized_sigma_v1",
         "feature_set_version": VOLATILITY_FEATURE_SET_VERSION,
         "code_commit": code_commit,
         "data_as_of": data_as_of,
-        "data_provider": data_provider,
+        "data_provider": (
+            f"{data_provider}|feed={getattr(snapshot, 'data_feed', 'unknown')}|adjustment={getattr(snapshot, 'price_adjustment', 'unknown')}|sha256={snapshot.data_fingerprint}"
+            if getattr(snapshot, "data_fingerprint", "")
+            else data_provider
+        ),
     }
     evidence["forecast_fingerprint"] = compute_forecast_fingerprint(**record_kwargs)
     return _PreparedForecast(
@@ -378,9 +398,7 @@ def score_volatility_ledger_route(
         logger.error("Forecast ledger unavailable while scoring %s", symbol)
         return JSONResponse(status_code=503, content=FORECAST_LEDGER_UNAVAILABLE_BODY)
     try:
-        from data_pipeline import fetch_historical_frame
-
-        df = fetch_historical_frame(symbol)
+        df = _download_ohlcv(symbol)
         if df is None or df.empty:
             raise HTTPException(
                 status_code=422, detail="No historical market data available for scoring."
@@ -399,6 +417,8 @@ def score_volatility_ledger_route(
         }
     except HTTPException:
         raise
+    except (MarketDataUnavailable, MarketTransportError, UnknownTickerError):
+        return JSONResponse(status_code=503, content=MARKET_DATA_UNAVAILABLE_BODY)
     except LedgerUnavailableError:
         logger.error("Forecast ledger unavailable while scoring %s", symbol)
         return JSONResponse(status_code=503, content=FORECAST_LEDGER_UNAVAILABLE_BODY)

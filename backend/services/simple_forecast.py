@@ -1,9 +1,9 @@
 """Small, auditable seven-session price forecasting benchmark.
 
-The production endpoint deliberately supports five liquid US equities.  It
+The production endpoint supports the active US/UK universe.  It
 trains quickly from completed daily OHLCV bars, chooses between two learned
 models on a chronological validation block, and reports performance on a
-later untouched test block.  Persistence is a comparison only; it never
+later retrospective test block.  Persistence is a comparison only; it never
 replaces the learned path returned to the user.
 """
 
@@ -14,6 +14,7 @@ import functools
 import hashlib
 import json
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -32,6 +33,7 @@ from sklearn.preprocessing import RobustScaler
 from calendars import future_trading_dates
 from config import settings
 from services import forecast_artifacts
+from services.training_budget import training_slot
 
 logger = logging.getLogger(__name__)
 
@@ -273,7 +275,7 @@ SUPPORTED_TICKERS: tuple[str, ...] = tuple(
     dict.fromkeys(tuple(TICKER_METADATA.keys()) + _broad_tickers)
 )
 FORECAST_DAYS = 7
-FEATURE_VERSION = "simple-price-v1"
+FEATURE_VERSION = "simple-price-v2-zero-range-neutral"
 MIN_HISTORY_ROWS = 500
 
 
@@ -306,32 +308,16 @@ _gpu_signature = None
 
 
 def _checkpoint_signature() -> str:
-    # Scan is order- and cwd-independent: the same physical checkpoint must
-    # produce the same signature whether the process was started from the
-    # repo root, backend/, or anywhere else, otherwise the durable-artifact
-    # cache key (and any cold-process reload) silently diverges.
-    found: dict[str, tuple[int, str]] = {}
-    for root in (
-        Path.cwd(),
-        Path(__file__).resolve().parents[2],
-        Path(__file__).resolve().parents[1],
-    ):
-        for relative in (
-            "tri_exchange_gpu_v2/model.pt",
-            "tri_exchange_gpu_v1/model.pt",
-            "simple_price_gpu_v2/baseline_price_only/model.pt",
-        ):
-            path = (root / "artifacts" / relative).resolve()
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
-            found[str(path)] = (
-                stat.st_size,
-                hashlib.sha256(path.read_bytes()).hexdigest(),
-            )
-    entries = sorted(found.items())
-    return hashlib.sha256(repr(entries).encode()).hexdigest()
+    configured = os.getenv("PRICE_GPU_CHECKPOINT_PATH", "").strip()
+    if not configured:
+        return "no_verified_price_gpu_configured"
+    path = Path(configured).resolve()
+    try:
+        return hashlib.sha256(
+            path.read_bytes() + Path(str(path) + ".sha256").read_bytes()
+        ).hexdigest()
+    except OSError:
+        return "unavailable_configured_checkpoint:" + str(path)
 
 
 def _forecast_cache_key(symbol: str, frame: pd.DataFrame, model: str) -> str:
@@ -402,15 +388,21 @@ def _infer_artifact(payload: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _load_fitted_forecast(cache_key: str) -> dict[str, Any] | None:
+def _load_fitted_forecast(cache_key: str, timings=None) -> dict[str, Any] | None:
     path = _disk_cache_path(cache_key)
     if path is None:
         return None
-    payload = forecast_artifacts.load(path.with_suffix(".artifact.json"), cache_key)
+    payload = forecast_artifacts.load(
+        path.with_suffix(".artifact.json"), cache_key, timings=timings
+    )
     if payload is None:
         return None
     try:
-        return _infer_artifact(payload)
+        t_infer = time.perf_counter()
+        value = _infer_artifact(payload)
+        if timings is not None:
+            timings["infer_ms"] = (time.perf_counter() - t_infer) * 1000.0
+        return value
     except Exception:
         logger.warning("Ignoring invalid fitted forecast artifact")
         return None
@@ -453,7 +445,9 @@ def build_features(frame: pd.DataFrame) -> pd.DataFrame:
         "return_20d": log_close.diff(20),
         "range_1d": intraday_range,
         "overnight_return": np.log(frame["Open"].astype(float) / previous_close),
-        "close_location": (close - frame["Low"]) / (frame["High"] - frame["Low"]),
+        "close_location": (
+            (close - frame["Low"]) / (frame["High"] - frame["Low"]).replace(0.0, np.nan)
+        ).fillna(0.5),
         "volume_change": log_volume.diff(),
         "drawdown_20d": close / close.rolling(20).max() - 1.0,
     }
@@ -476,6 +470,10 @@ def build_dataset(frame: pd.DataFrame) -> ForecastDataset:
     if len(frame) < MIN_HISTORY_ROWS:
         raise ValueError(f"At least {MIN_HISTORY_ROWS} completed sessions are required.")
     features = build_features(frame)
+    if features.empty or features.index[-1] != frame.index[-1]:
+        raise ValueError(
+            "Latest session cannot form valid price features; stale inference is prohibited."
+        )
     log_close = np.log(frame["Close"].astype(float))
     position_by_date = pd.Series(np.arange(len(frame), dtype=int), index=frame.index)
     labelled = features.index[
@@ -575,53 +573,30 @@ def _clip_predictions(predicted: np.ndarray, reference_targets: np.ndarray) -> n
 
 @functools.lru_cache(maxsize=1)
 def _load_gpu_lstm_model() -> tuple[Any, dict[str, Any], list[str]] | None:
+    # Only explicitly configured, self-describing artifacts may serve a point prediction.
+    path = os.getenv("PRICE_GPU_CHECKPOINT_PATH", "").strip()
+    if not path:
+        return None
     try:
-        from pathlib import Path
-
         import torch
-        from research.price_forecasting.gpu_pipeline import PriceTrainingConfig, _build_model
+        from research.price_forecasting.checkpoint_contract import load_verified_checkpoint
+        from research.price_forecasting.gpu_pipeline import (
+            FEATURE_NAMES,
+            PriceTrainingConfig,
+            _build_model,
+        )
 
-        candidates = [
-            Path.cwd() / "artifacts" / "tri_exchange_gpu_v2" / "model.pt",
-            Path(__file__).resolve().parents[2] / "artifacts" / "tri_exchange_gpu_v2" / "model.pt",
-            Path(__file__).resolve().parents[1] / "artifacts" / "tri_exchange_gpu_v2" / "model.pt",
-            Path.cwd() / "artifacts" / "tri_exchange_gpu_v1" / "model.pt",
-            Path(__file__).resolve().parents[2] / "artifacts" / "tri_exchange_gpu_v1" / "model.pt",
-            Path(__file__).resolve().parents[1] / "artifacts" / "tri_exchange_gpu_v1" / "model.pt",
-            Path.cwd() / "artifacts" / "simple_price_gpu_v2" / "baseline_price_only" / "model.pt",
-            Path(__file__).resolve().parents[2]
-            / "artifacts"
-            / "simple_price_gpu_v2"
-            / "baseline_price_only"
-            / "model.pt",
-            Path(__file__).resolve().parents[1]
-            / "artifacts"
-            / "simple_price_gpu_v2"
-            / "baseline_price_only"
-            / "model.pt",
-        ]
-        ckpt_path = next((p for p in candidates if p.is_file()), None)
-        if not ckpt_path:
-            return None
-        ckpt = torch.load(ckpt_path, map_location="cpu")
-        ticker_names = list(ckpt.get("ticker_names") or ["AAPL", "GOOGL", "MSFT", "NVDA", "TSLA"])
-        embed_dim = int(
-            ckpt.get("embed_dim") or ckpt["state_dict"]["ticker_embedding.weight"].shape[1]
-        )
-        hidden_size = int(
-            ckpt.get("config", {}).get("hidden_size") or ckpt["state_dict"]["norm.weight"].shape[0]
-        )
-        layers = int(ckpt.get("config", {}).get("layers") or 2)
-        model_config = PriceTrainingConfig(
-            hidden_size=hidden_size, layers=layers, embed_dim=embed_dim
-        )
-        model = _build_model(
-            torch, torch.nn, 25, len(ticker_names), model_config, embed_dim=embed_dim
-        )
-        model.load_state_dict(ckpt["state_dict"])
+        checkpoint = load_verified_checkpoint(path, feature_names=FEATURE_NAMES)
+        if checkpoint.get("feature_mode") != "price_only":
+            raise ValueError("Only verified price-only checkpoint schemas are supported")
+        config = PriceTrainingConfig(**checkpoint["config"])
+        tickers = checkpoint["ticker_names"]
+        model = _build_model(torch, torch.nn, len(FEATURE_NAMES), len(tickers), config)
+        model.load_state_dict(checkpoint["state_dict"], strict=True)
         model.eval()
-        return model, ckpt["scalers"], ticker_names
+        return model, checkpoint["scalers"], tickers
     except Exception:
+        logger.warning("Price GPU checkpoint rejected: unsupported schema or unverified provenance")
         return None
 
 
@@ -657,14 +632,38 @@ def _predict_gpu_lstm(
     return preds
 
 
+def _with_timing(result, started, status, **stages):
+    value = copy.deepcopy(result)
+    value["timing"] = {
+        "cache_status": status,
+        "artifact_lookup_ms": stages.get("lookup_ms", 0.0),
+        "model_load_ms": stages.get("model_load_ms", 0.0),
+        "features_ms": stages.get("features_ms", 0.0),
+        "train_ms": stages.get("train_ms", 0.0),
+        "infer_ms": stages.get("infer_ms", 0.0),
+        "service_total_ms": (time.perf_counter() - started) * 1000.0,
+    }
+    return value
+
+
 def train_and_forecast(
     ticker: str, frame: pd.DataFrame, model_name: str = "auto"
 ) -> dict[str, Any]:
     # Bounded striped locks prevent same-key stampedes without an unbounded lock registry.
     # This coordinates threads in one worker; disk cache also reuses completed work after restart.
     symbol = ticker.strip().upper()
+    cache_started = time.perf_counter()
+    key = _forecast_cache_key(symbol, frame, model_name.strip().lower())
+    with _cache_lock:
+        cached = _cache.get(key)
+        if cached is not None:
+            return _with_timing(cached, cache_started, "memory_hit")
     slot = int(hashlib.sha256(symbol.encode()).hexdigest(), 16) % len(_training_locks)
-    with _training_locks[slot]:
+    if not _training_locks[slot].acquire(timeout=2.0):
+        from services.training_budget import TrainingBusyError
+
+        raise TrainingBusyError("Forecast training is busy. Please retry shortly.")
+    try:
         global _gpu_signature
         signature = _checkpoint_signature()
         with _cache_lock:
@@ -674,6 +673,8 @@ def train_and_forecast(
                     clear_loader()
                 _gpu_signature = signature
         return _train_and_forecast_locked(ticker, frame, model_name)
+    finally:
+        _training_locks[slot].release()
 
 
 def _train_and_forecast_locked(
@@ -684,6 +685,8 @@ def _train_and_forecast_locked(
     if symbol not in SUPPORTED_TICKERS:
         raise ValueError(f"Ticker must be one of: {', '.join(SUPPORTED_TICKERS)}")
     normalized_model = model_name.strip().lower()
+    if normalized_model not in {"auto", "ridge", "random_forest", "gpu_lstm", "lstm"}:
+        raise ValueError("Unsupported explicit price model request.")
     frame = frame.loc[~frame.index.duplicated(keep="last")].sort_index()
     data_as_of = pd.Timestamp(frame.index[-1]).date().isoformat()
     cache_key = _forecast_cache_key(symbol, frame, normalized_model)
@@ -698,8 +701,11 @@ def _train_and_forecast_locked(
                 normalized_model,
                 (time.perf_counter() - started) * 1000.0,
             )
-            return copy.deepcopy(cached)
-    disk_cached = _load_fitted_forecast(cache_key)
+            return _with_timing(cached, started, "memory_hit")
+    t_artifact = time.perf_counter()
+    artifact_timings = {}
+    disk_cached = _load_fitted_forecast(cache_key, artifact_timings)
+    lookup_ms = (time.perf_counter() - t_artifact) * 1000.0
     if disk_cached is not None:
         with _cache_lock:
             _cache[cache_key] = disk_cached
@@ -710,14 +716,79 @@ def _train_and_forecast_locked(
             normalized_model,
             (time.perf_counter() - started) * 1000.0,
         )
-        return copy.deepcopy(disk_cached)
+        return _with_timing(disk_cached, started, "artifact_hit", **artifact_timings)
 
+    # Only cache misses consume scarce fitting capacity. The context releases on errors.
+    with training_slot():
+        return _fit_forecast(
+            symbol, frame, normalized_model, data_as_of, cache_key, started, lookup_ms
+        )
+
+
+def _fit_forecast(symbol, frame, normalized_model, data_as_of, cache_key, started, lookup_ms):
     t_features = time.perf_counter()
     dataset = build_dataset(frame)
     train_mask, validation_mask, test_mask = chronological_masks(dataset, len(frame))
     features_ms = (time.perf_counter() - t_features) * 1000.0
     labelled_features = dataset.features.iloc[: dataset.labelled_count].to_numpy(dtype=np.float64)
     targets = dataset.targets
+    # Explicit checkpoint inference is experimental and supplies no historical metrics.
+    if normalized_model in ("gpu_lstm", "lstm"):
+        t_load = time.perf_counter()
+        loaded = _load_gpu_lstm_model()
+        if loaded is None or symbol not in loaded[2]:
+            raise ValueError(
+                "GPU price prediction unavailable: checkpoint provenance is unverified."
+            )
+        model_load_ms = (time.perf_counter() - t_load) * 1000.0
+        import torch
+
+        model, scalers, tickers = loaded
+        latest = dataset.features.iloc[-60:].to_numpy(dtype=np.float32)
+        mean, std = np.asarray(scalers["feature_mean"]), np.asarray(scalers["feature_std"])
+        with torch.no_grad():
+            raw = model(
+                torch.tensor((latest - mean) / std).unsqueeze(0).float(),
+                torch.tensor([tickers.index(symbol)]),
+            )
+        returns = raw.numpy()[0] * np.asarray(scalers["target_std"]) + np.asarray(
+            scalers["target_mean"]
+        )
+        prices = float(frame["Close"].iloc[-1]) * np.exp(returns)
+        if not np.isfinite(prices).all() or (prices <= 0).any():
+            raise ValueError("GPU checkpoint produced invalid prices")
+        dates, calendar = future_trading_dates(symbol, frame.index[-1], FORECAST_DAYS)
+        return _with_timing(
+            {
+                "ticker": symbol,
+                "data_as_of": data_as_of,
+                "current_price": float(frame["Close"].iloc[-1]),
+                "forecast_days": 7,
+                "predicted_prices": prices.tolist(),
+                "future_dates": dates,
+                "historical_dates": [v.date().isoformat() for v in frame.index[-90:]],
+                "historical_prices": frame["Close"].iloc[-90:].tolist(),
+                "model": {
+                    "name": "gpu_lstm",
+                    "requested": normalized_model,
+                    "selected": "gpu_lstm",
+                    "selection_reason": "explicit_verified_checkpoint",
+                    "status": "experimental_point_only",
+                },
+                "backtest": None,
+                "evaluation": {
+                    "status": "unavailable",
+                    "reason": "Serving checkpoint is not historical evaluation evidence",
+                },
+                "provenance": {**frame.attrs, "calendar": calendar, "feature_origin": data_as_of},
+            },
+            started,
+            "checkpoint",
+            lookup_ms=lookup_ms,
+            features_ms=features_ms,
+            model_load_ms=model_load_ms,
+        )
+
     candidates = _candidate_models()
     validation_scores: dict[str, float] = {}
     validation_predictions: dict[str, np.ndarray] = {}
@@ -729,150 +800,85 @@ def _train_and_forecast_locked(
         validation_predictions[name] = predicted
         validation_scores[name] = float(mean_absolute_error(targets[validation_mask], predicted))
 
-    gpu_lstm_info = _load_gpu_lstm_model()
-    use_gpu_lstm = False
-    if gpu_lstm_info is not None:
-        lstm_model, scalers, gpu_tickers = gpu_lstm_info
-        if symbol in gpu_tickers:
-            use_gpu_lstm = True
-            f_mean = np.array(scalers["feature_mean"], dtype=np.float32)
-            f_std = np.array(scalers["feature_std"], dtype=np.float32)
-            f_std[f_std < 1e-8] = 1.0
-            t_mean = np.array(scalers["target_mean"], dtype=np.float32)
-            t_std = np.array(scalers["target_std"], dtype=np.float32)
-            t_idx = gpu_tickers.index(symbol)
-
-            val_origins = np.where(validation_mask)[0]
-            feat_all = dataset.features.iloc[: dataset.labelled_count].to_numpy(dtype=np.float32)
-            val_pred_arr = _clip_predictions(
-                _predict_gpu_lstm(
-                    lstm_model,
-                    feat_all,
-                    val_origins,
-                    f_mean,
-                    f_std,
-                    t_mean,
-                    t_std,
-                    t_idx,
-                    validation_predictions["ridge"],
-                ),
-                targets[train_mask],
-            )
-            validation_predictions["gpu_lstm"] = val_pred_arr
-            validation_scores["gpu_lstm"] = float(
-                mean_absolute_error(targets[validation_mask], val_pred_arr)
-            )
-
-    if normalized_model in ("gpu_lstm", "lstm") and use_gpu_lstm:
-        selected_name = "gpu_lstm"
-    elif normalized_model in candidates:
-        selected_name = normalized_model
-    else:
-        selected_name = min(validation_scores, key=validation_scores.get)
+    if normalized_model not in {"auto", *candidates}:
+        raise ValueError("Unsupported explicit price model request.")
+    selected_name = (
+        normalized_model
+        if normalized_model in candidates
+        else min(validation_scores, key=validation_scores.get)
+    )
     select_ms = (time.perf_counter() - started) * 1000.0 - features_ms
 
-    if selected_name == "gpu_lstm" and use_gpu_lstm:
-        assert gpu_lstm_info is not None
-        lstm_model, scalers, gpu_tickers = gpu_lstm_info
-        import torch
+    evaluation_model = _candidate_models()[selected_name]
+    development_mask = train_mask | validation_mask
+    evaluation_model.fit(labelled_features[development_mask], targets[development_mask])
+    test_prediction = _clip_predictions(
+        evaluation_model.predict(labelled_features[test_mask]), targets[development_mask]
+    )
+    metrics = _metrics(targets[test_mask], test_prediction)
+    majority = np.where(
+        (targets[train_mask] > 0).sum(axis=0) >= (targets[train_mask] < 0).sum(axis=0), 1, -1
+    )
+    metrics["majority_direction_accuracy"] = float(np.mean(np.sign(targets[test_mask]) == majority))
 
-        val_pred_arr = validation_predictions["gpu_lstm"]
-        validation_residuals = targets[validation_mask] - val_pred_arr
-        residual_low = np.quantile(validation_residuals, 0.10, axis=0)
-        residual_high = np.quantile(validation_residuals, 0.90, axis=0)
-
-        # Forecast using latest 60 features
-        latest_seq = dataset.features.iloc[-60:].to_numpy(dtype=np.float32)
-        if len(latest_seq) == 60:
-            norm_seq = (latest_seq - f_mean) / f_std
-            fitted = {
-                "kind": "checkpoint",
-                "inputs": norm_seq,
-                "target_mean": t_mean,
-                "target_std": t_std,
-                "scalers": scalers,
-                "checkpoint_hash": _checkpoint_signature(),
+    # The uncertainty band is calibrated on validation residuals only.
+    validation_residuals = targets[validation_mask] - validation_predictions[selected_name]
+    residual_low = np.quantile(validation_residuals, 0.10, axis=0)
+    residual_high = np.quantile(validation_residuals, 0.90, axis=0)
+    evaluation_band = {
+        "scope": "retrospective_evaluation_model",
+        "current_refit_coverage": "unavailable",
+        "per_horizon": [
+            {
+                "sessions": h + 1,
+                "coverage": float(
+                    np.mean(
+                        (targets[test_mask, h] >= test_prediction[:, h] + residual_low[h])
+                        & (targets[test_mask, h] <= test_prediction[:, h] + residual_high[h])
+                    )
+                ),
+                "lower_tail_miss": float(
+                    np.mean(targets[test_mask, h] < test_prediction[:, h] + residual_low[h])
+                ),
+                "upper_tail_miss": float(
+                    np.mean(targets[test_mask, h] > test_prediction[:, h] + residual_high[h])
+                ),
+                "mean_width_pct_of_origin": float(
+                    np.mean(
+                        100
+                        * (
+                            np.exp(test_prediction[:, h] + residual_high[h])
+                            - np.exp(test_prediction[:, h] + residual_low[h])
+                        )
+                    )
+                ),
             }
-            t_id = torch.tensor([t_idx], dtype=torch.long)
-            with torch.no_grad():
-                out = lstm_model(torch.tensor(norm_seq).unsqueeze(0).float(), t_id)
-            forecast_returns = (out.detach().numpy()[0] * t_std + t_mean).astype(np.float64)
-            forecast_returns = _clip_predictions(forecast_returns.reshape(1, -1), targets).reshape(
-                -1
-            )
-        else:
-            prod_model = _candidate_models()["ridge"]
-            prod_model.fit(labelled_features, targets)
-            fitted = {
-                "kind": "sklearn",
-                "model": prod_model,
-                "inputs": dataset.features.iloc[[-1]].to_numpy(dtype=np.float64),
-            }
-            forecast_returns = _clip_predictions(
-                prod_model.predict(dataset.features.iloc[[-1]].to_numpy(dtype=np.float64)), targets
-            ).reshape(-1)
+            for h in range(FORECAST_DAYS)
+        ],
+    }
 
-        # Honest Test metrics: evaluate GPU LSTM on untouched test split
-        eval_model = _candidate_models()["ridge"]
-        dev_mask = train_mask | validation_mask
-        eval_model.fit(labelled_features[dev_mask], targets[dev_mask])
-        test_pred_ridge = _clip_predictions(
-            eval_model.predict(labelled_features[test_mask]), targets[dev_mask]
-        )
-
-        test_origins = np.where(test_mask)[0]
-        test_pred = _clip_predictions(
-            _predict_gpu_lstm(
-                lstm_model,
-                feat_all,
-                test_origins,
-                f_mean,
-                f_std,
-                t_mean,
-                t_std,
-                t_idx,
-                test_pred_ridge,
-            ),
-            targets[dev_mask],
-        )
-        metrics = _metrics(targets[test_mask], test_pred)
-        model_meta = {
-            "name": "gpu_lstm",
-            "kind": "learned_gpu_lstm_model",
-            "feature_version": "price-v2-rtx2060",
-            "target": "direct_cumulative_log_returns_1_to_7_sessions",
-            "selection": "lowest validation MAE among learned candidates (CUDA RTX 2060 LSTM)",
-            "candidate_validation_mae": validation_scores,
-        }
-    else:
-        evaluation_model = _candidate_models()[selected_name]
-        development_mask = train_mask | validation_mask
-        evaluation_model.fit(labelled_features[development_mask], targets[development_mask])
-        test_prediction = _clip_predictions(
-            evaluation_model.predict(labelled_features[test_mask]), targets[development_mask]
-        )
-        metrics = _metrics(targets[test_mask], test_prediction)
-
-        # The uncertainty band is calibrated on validation residuals only.
-        validation_residuals = targets[validation_mask] - validation_predictions[selected_name]
-        residual_low = np.quantile(validation_residuals, 0.10, axis=0)
-        residual_high = np.quantile(validation_residuals, 0.90, axis=0)
-
-        production_model = _candidate_models()[selected_name]
-        production_model.fit(labelled_features, targets)
-        latest_features = dataset.features.iloc[[-1]].to_numpy(dtype=np.float64)
-        fitted = {"kind": "sklearn", "model": production_model, "inputs": latest_features}
-        forecast_returns = _clip_predictions(
-            production_model.predict(latest_features), targets
-        ).reshape(-1)
-        model_meta = {
-            "name": selected_name,
-            "kind": "learned_historical_model",
-            "feature_version": FEATURE_VERSION,
-            "target": "direct_cumulative_log_returns_1_to_7_sessions",
-            "selection": "lowest validation MAE among learned candidates",
-            "candidate_validation_mae": validation_scores,
-        }
+    production_model = _candidate_models()[selected_name]
+    production_model.fit(labelled_features, targets)
+    latest_features = dataset.features.iloc[[-1]].to_numpy(dtype=np.float64)
+    fitted = {"kind": "sklearn", "model": production_model, "inputs": latest_features}
+    t_infer = time.perf_counter()
+    forecast_returns = _clip_predictions(
+        production_model.predict(latest_features), targets
+    ).reshape(-1)
+    infer_ms = (time.perf_counter() - t_infer) * 1000.0
+    model_meta = {
+        "name": selected_name,
+        "kind": "learned_historical_model",
+        "feature_version": FEATURE_VERSION,
+        "target": "direct_cumulative_log_returns_1_to_7_sessions",
+        "selection": "lowest validation MAE among learned candidates",
+        "candidate_validation_mae": validation_scores,
+        "requested": normalized_model,
+        "selected": selected_name,
+        "selection_reason": "explicit_request"
+        if normalized_model != "auto"
+        else "minimum_fixed_candidate_validation_mae",
+    }
 
     current_price = float(frame["Close"].iloc[-1])
     predicted_prices = current_price * np.exp(forecast_returns)
@@ -910,14 +916,22 @@ def _train_and_forecast_locked(
             "test_start": test_dates[0].date().isoformat(),
             "test_end": test_dates[-1].date().isoformat(),
             "test_samples": int(test_mask.sum()),
-            "metric_source": "untouched_chronological_test",
+            "metric_source": "retrospective_chronological_test",
+            "evaluated_series": "predicted_prices",
+            "midpoint_evaluation": "unavailable",
+            "interval_coverage": "unavailable",
             **metrics,
         },
+        "historical_error_band_evidence": evaluation_band,
         "provenance": {
             "data_provider": str(frame.attrs.get("data_provider", "unknown")),
             "market_data_cache": str(frame.attrs.get("market_data_cache", "unknown")),
             "calendar": calendar,
             "completed_daily_bars_only": True,
+            "feature_origin": dataset.features.index[-1].date().isoformat(),
+            "data_feed": frame.attrs.get("data_feed", "unknown"),
+            "price_adjustment": frame.attrs.get("price_adjustment", "unknown"),
+            "data_fingerprint": frame.attrs.get("data_fingerprint", ""),
         },
         "news": {
             "role": "context_only",
@@ -966,7 +980,15 @@ def _train_and_forecast_locked(
             forecast_artifacts.save(artifact_path.with_suffix(".artifact.json"), cache_key, fitted)
         except Exception:
             logger.warning("Fitted forecast could not be persisted; serving the fresh result")
-    return copy.deepcopy(result)
+    return _with_timing(
+        result,
+        started,
+        "trained",
+        lookup_ms=lookup_ms,
+        features_ms=features_ms,
+        infer_ms=infer_ms,
+        train_ms=max(0.0, total_ms - features_ms - lookup_ms - infer_ms),
+    )
 
 
 def clear_forecast_cache() -> None:

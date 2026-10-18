@@ -13,6 +13,7 @@ from config import APP_VERSION, settings
 from data_pipeline import market_circuit_breaker, market_data_service
 from services.forecast_ledger import LedgerUnavailableError, get_forecast_ledger
 from services.live_volatility import SUPPORTED_BASELINES
+from services.simple_forecast import FEATURE_VERSION, SUPPORTED_TICKERS
 from services.volatility_contract import AUTO_MODEL_POLICY, VOLATILITY_MODEL_POLICY_VERSION
 from services.volatility_snapshot import VOLATILITY_HORIZONS
 
@@ -131,7 +132,13 @@ def models_discovery():
             "status": "available",
             "endpoint": "/api/v1/forecast",
             "horizon": 7,
-            "supported_tickers": ["AAPL", "GOOGL", "MSFT", "NVDA", "TSLA"],
+            "supported_tickers": list(SUPPORTED_TICKERS),
+            "supported_ticker_count": len(SUPPORTED_TICKERS),
+            "feature_version": FEATURE_VERSION,
+            "metric_source": "retrospective_chronological_test",
+            "evaluated_series": "predicted_prices",
+            "midpoint_evaluation": "unavailable",
+            "current_refit_interval_coverage": "unavailable",
             "learned_candidates": ["ridge", "random_forest"],
             "evaluation": "chronological_70_15_15_with_7_session_purge",
             "news_endpoint": "/api/v1/news",
@@ -143,13 +150,21 @@ def models_discovery():
             "public_forecast_mode": "read_only_preview",
             "live_collection_endpoint": "/api/v1/volatility/collect",
             "live_collection_authentication": "bearer_token_required",
-            "metric_source": "baseline_definition",
+            "metric_source": "response_evidence_per_selected_model",
             "supported_horizons": list(VOLATILITY_HORIZONS),
             "supported_models": list(SUPPORTED_BASELINES),
             "model_policy_version": VOLATILITY_MODEL_POLICY_VERSION,
             "auto_model_policy": {
                 str(horizon): model for horizon, model in AUTO_MODEL_POLICY.items()
             },
+        },
+        "training_capacity": {
+            "per_worker": settings.forecast_training_max_concurrency,
+            "cross_worker_coordination": "postgresql_advisory_lock"
+            if settings.forecast_training_coordination_database_url
+            else "not_configured",
+            "busy_status": 503,
+            "retry_after_seconds": 3,
         },
         "model_storage": {
             "required": False,

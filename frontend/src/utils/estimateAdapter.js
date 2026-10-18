@@ -51,12 +51,17 @@ export function getSharedEstimatePresentation({ forecast, history, currencySymbo
   if (Number(lastBar.c).toFixed(precision) !== Number(forecast.current_price).toFixed(precision)) {
     return unavailable('origin_mismatch', 'Origin price mismatch');
   }
+  if (history.dataFingerprint && forecast.provenance?.data_fingerprint && history.dataFingerprint !== forecast.provenance.data_fingerprint) return unavailable('origin_mismatch', 'Market data identity mismatch');
   const finalPrice = series[6];
   const changePct = (finalPrice / Number(forecast.current_price) - 1) * 100;
   if (!Number.isFinite(changePct)) return unavailable('invalid_bounds');
   return {
     isAvailable: true, isMismatch: false, mismatchReason: null, reason: null,
     series, futureDates: [...dates], finalPrice, changePct,
+    label: 'Range midpoint — experimental',
+    pointEstimate: Array.isArray(forecast.predicted_prices) && forecast.predicted_prices.length === 7
+      && forecast.predicted_prices.every(positive) ? Number(forecast.predicted_prices[6]) : null,
+    midpointEvaluation: 'unavailable',
     direction: Math.abs(changePct) < 0.001 ? 'flat' : changePct > 0 ? 'up' : 'down',
   };
 }

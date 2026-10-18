@@ -297,6 +297,11 @@ class VolatilityInferenceSnapshot:
     baseline_variance_paths: dict[str, np.ndarray] | None = None
     garch_variance_path: np.ndarray | None = None
     data_as_of: str | None = None
+    raw_dates: tuple[str, ...] = ()
+    raw_ohlcv: tuple[tuple[float, ...], ...] = ()
+    data_fingerprint: str = ""
+    data_feed: str = "unknown"
+    price_adjustment: str = "unknown"
 
     def __post_init__(self) -> None:
         if self.features.shape != (VOLATILITY_WINDOW_SIZE, len(self.feature_names)):
@@ -471,7 +476,7 @@ def _frame_fingerprint(symbol: str, raw: pd.DataFrame) -> str:
     """Content identity of the observations a snapshot is derived from."""
     digest = hashlib.sha256(symbol.encode("utf-8"))
     digest.update(pd.util.hash_pandas_object(raw, index=True).values.tobytes())
-    for attribute in ("data_as_of", "data_provider", "market_data_cache"):
+    for attribute in ("data_as_of", "data_provider", "data_feed", "price_adjustment"):
         digest.update(str(raw.attrs.get(attribute, "")).encode("utf-8"))
     return digest.hexdigest()
 
@@ -580,4 +585,12 @@ def _build_volatility_inference_snapshot(
         historical_prices=history["Close"].to_numpy(dtype=np.float64),
         future_dates=tuple(future_dates),
         data_as_of=data_as_of,
+        raw_dates=tuple(value.date().isoformat() for value in raw.index),
+        raw_ohlcv=tuple(
+            tuple(float(v) for v in row)
+            for row in raw[["Open", "High", "Low", "Close", "Volume"]].to_numpy()
+        ),
+        data_fingerprint=str(raw.attrs.get("data_fingerprint", "")),
+        data_feed=str(raw.attrs.get("data_feed", "unknown")),
+        price_adjustment=str(raw.attrs.get("price_adjustment", "unknown")),
     )

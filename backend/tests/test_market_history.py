@@ -63,22 +63,16 @@ def test_history_downsamples_long_series_but_keeps_latest_bar(monkeypatch):
     assert body["intraday_session"] is None
 
 
-def test_history_routes_lse_tickers_to_yahoo(monkeypatch):
-    calls: list[str] = []
+def test_history_routes_lse_through_same_contract(monkeypatch):
+    calls = []
 
-    def fake_yahoo(self, symbol: str, *, years: int):
-        calls.append(f"yahoo:{symbol}:{years}")
+    def fetch(symbol, *, years):
+        calls.append(symbol)
         return _result(60, provider="yahoo")
 
-    def fail_service(symbol: str, *, years: int):
-        raise AssertionError("shared forecast service must not serve LSE history")
-
-    monkeypatch.setattr("market_data.yahoo.YahooProvider.fetch_daily_bars", fake_yahoo)
-    monkeypatch.setattr("data_pipeline.market_data_service.fetch_daily_bars", fail_service)
-    body = CLIENT.get("/api/v1/history", params={"ticker": "SHEL.L"}).json()
-    assert body["provider"] == "yahoo"
-    assert calls == ["yahoo:SHEL.L:10"]
-    assert len(body["daily"]) == 60
+    monkeypatch.setattr("data_pipeline.market_data_service.fetch_daily_bars", fetch)
+    assert CLIENT.get("/api/v1/history?ticker=SHEL.L").status_code == 200
+    assert calls == ["SHEL.L"]
 
 
 def test_history_unknown_ticker_is_404(monkeypatch):

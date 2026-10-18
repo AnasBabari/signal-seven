@@ -6,6 +6,7 @@
  * is no longer required for ordinary forecasts.
  */
 
+import { getApiBase, requestJson } from '../api/request';
 import { VOLATILITY_HORIZONS } from './volatilityContract';
 
 export { VOLATILITY_HORIZONS } from './volatilityContract';
@@ -260,7 +261,7 @@ export async function fetchVolatilityForecast(
   symbol,
   days,
   signal,
-  { baseUrl = import.meta.env.VITE_API_URL || window.STOCKLSTM_API_BASE || '', fetchImpl = (...args) => globalThis.fetch(...args), model = null } = {},
+  { baseUrl = getApiBase(), fetchImpl = (...args) => globalThis.fetch(...args), model = null, timeoutMs = 20_000 } = {},
 ) {
   const requestTicker = String(symbol).trim().toUpperCase();
   const horizon = Number(days);
@@ -268,17 +269,16 @@ export async function fetchVolatilityForecast(
     throw new Error('Volatility forecast requires a supported ticker and horizon.');
   }
   const modelQuery = model ? `&model=${encodeURIComponent(String(model))}` : '';
-  const response = await fetchImpl(
-    `${baseUrl}/api/v1/volatility/forecast?ticker=${encodeURIComponent(requestTicker)}&horizon=${horizon}${modelQuery}`,
-    { signal, cache: 'no-cache' },
-  );
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const apiError = apiErrorBody(body);
-    throw new VolatilityApiError(apiError.reason, {
-      code: apiError.code,
-      httpStatus: response.status,
-    });
+  let body;
+  try { body = await requestJson(
+    `/api/v1/volatility/forecast?ticker=${encodeURIComponent(requestTicker)}&horizon=${horizon}${modelQuery}`,
+    { signal, timeoutMs, baseUrl, fetchImpl },
+  ); } catch (error) {
+    if (error.status) {
+      const details = apiErrorBody(error.payload);
+      throw new VolatilityApiError(details.reason, { code: details.code, httpStatus: error.status });
+    }
+    throw error;
   }
   return mapVolatilityResponse(body, requestTicker, horizon);
 }

@@ -167,6 +167,13 @@ def _trailing_risk_context(frame, forecast_daily_variance: float) -> dict[str, o
         }
 
 
+def _snapshot_risk_context(snapshot, daily_variance):
+    import pandas as pd
+
+    frame = pd.DataFrame({"Close": snapshot.historical_prices})
+    return _trailing_risk_context(frame, daily_variance)
+
+
 def _build_g3_forecast(
     snapshot: VolatilityInferenceSnapshot, horizon: int, requested_model: str
 ) -> dict[str, Any]:
@@ -176,12 +183,24 @@ def _build_g3_forecast(
     (flagged in evidence) rather than failing the request; upstream market
     errors propagate to the route's usual 503/422 mapping.
     """
-    from data_pipeline import _download_ohlcv
     from services import g3_volatility as g3
 
     fallback_reason: str | None = None
     try:
-        frame = _download_ohlcv(snapshot.ticker)
+        import pandas as pd
+
+        if not getattr(snapshot, "raw_ohlcv", ()):
+            raise g3.G3UnavailableError("Snapshot does not contain immutable market observations")
+        frame = pd.DataFrame(
+            snapshot.raw_ohlcv,
+            index=pd.to_datetime(snapshot.raw_dates),
+            columns=["Open", "High", "Low", "Close", "Volume"],
+        )
+        if (
+            frame.index[-1].date().isoformat() != snapshot.origin_date
+            or float(frame["Close"].iloc[-1]) != snapshot.origin_close
+        ):
+            raise ValueError("Snapshot market origin mismatch")
         variance = g3.g3_cumulative_variance(frame, horizon)
         model_name = GPU_G3_MODEL
         variance_path = None
@@ -201,7 +220,11 @@ def _build_g3_forecast(
     if len(future_dates) != horizon:
         raise ValueError("calendar did not provide the requested forecast horizon")
     learned = model_name == GPU_G3_MODEL
-    risk = _trailing_risk_context(frame, variance / horizon) if learned else {}
+    risk = (
+        _trailing_risk_context(frame, variance / horizon)
+        if learned
+        else _snapshot_risk_context(snapshot, variance / horizon)
+    )
     return {
         "ticker": snapshot.ticker,
         "as_of": snapshot.origin_date,
@@ -239,13 +262,9 @@ def _build_g3_forecast(
             "selected_horizon": horizon,
             "fallback_used": fallback_reason,
             "test_evidence_qlike_vs_rolling": None,
-            "risk_level": risk.get("risk_level") if learned else None,
-            "risk_ratio_vs_trailing_60d": risk.get("risk_ratio_vs_trailing_60d")
-            if learned
-            else None,
-            "trailing_annualized_volatility_60d": risk.get("trailing_annualized_volatility_60d")
-            if learned
-            else None,
+            "risk_level": risk.get("risk_level"),
+            "risk_ratio_vs_trailing_60d": risk.get("risk_ratio_vs_trailing_60d"),
+            "trailing_annualized_volatility_60d": risk.get("trailing_annualized_volatility_60d"),
             "promotion_reference": "artifacts/g3_panel_v1/manifest.json" if learned else None,
             "scenario_label": "gaussian_model_implied_price_range",
             "scenario_description": (
@@ -261,6 +280,9 @@ def _build_g3_forecast(
             "target_definition": "sqrt(252 / H * sum(next H close-to-close log returns squared))",
             "snapshot_id": snapshot.snapshot_id,
             "data_provider": getattr(snapshot, "data_provider", "unknown"),
+            "data_feed": getattr(snapshot, "data_feed", "unknown"),
+            "price_adjustment": getattr(snapshot, "price_adjustment", "unknown"),
+            "data_fingerprint": getattr(snapshot, "data_fingerprint", ""),
             "data_as_of": getattr(snapshot, "data_as_of", None) or snapshot.origin_date,
             "market_data_cache": getattr(snapshot, "market_data_cache", "unknown"),
             "schema_version": "deployable_v5",
@@ -332,6 +354,7 @@ def build_live_volatility_forecast(
                 "Gaussian log-return reference model; not a point price forecast or "
                 "calibrated confidence interval."
             ),
+            **_snapshot_risk_context(snapshot, variance / normalized_horizon),
             "metric_source": "baseline_definition",
             "interval_method": "gaussian_reference_scenario",
             "interval_nominal_coverage": 0.90,
@@ -340,6 +363,9 @@ def build_live_volatility_forecast(
             "target_definition": "sqrt(252 / H * sum(next H close-to-close log returns squared))",
             "snapshot_id": snapshot.snapshot_id,
             "data_provider": getattr(snapshot, "data_provider", "unknown"),
+            "data_feed": getattr(snapshot, "data_feed", "unknown"),
+            "price_adjustment": getattr(snapshot, "price_adjustment", "unknown"),
+            "data_fingerprint": getattr(snapshot, "data_fingerprint", ""),
             "data_as_of": getattr(snapshot, "data_as_of", None) or snapshot.origin_date,
             "market_data_cache": getattr(snapshot, "market_data_cache", "unknown"),
             "schema_version": "deployable_v5",

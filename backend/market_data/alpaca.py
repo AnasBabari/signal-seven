@@ -167,9 +167,13 @@ class AlpacaProvider:
             )
         except (KeyError, TypeError, ValueError) as err:
             raise MarketDataProviderError("Alpaca returned incomplete daily bars") from err
-        normalized = normalize_daily_bars(frame, provider=self.name, symbol=symbol)
+        normalized = normalize_daily_bars(
+            frame, provider=self.name, symbol=symbol, timestamp_kind="instant"
+        )
         return MarketDataResult(
             frame=normalized,
             provider=self.name,
+            feed=self.feed,
+            adjustment=self.adjustment,
             data_as_of=normalized.index[-1].date().isoformat(),
         )

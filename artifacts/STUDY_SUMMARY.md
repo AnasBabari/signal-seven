@@ -1,5 +1,7 @@
 # OHLCV Multi-Horizon Alpha Evaluation — Completed Negative Study
 
+> Audit availability check (2 October 2026): This archived summary contains historical development results. The pooled split implementation was subsequently repaired to use shared calendar cutoffs. These summaries do not establish independent current performance. Local referenced artifact availability: `artifacts/macro_ridge_2026-09-05/`: 0 files; `artifacts/market_context_comparison_20260905_010222/`: 4 files; `artifacts/price_validation_comparison_20260905_003731/`: 2 files; `artifacts/residual_rank_2026-09-05/`: 2 files; `artifacts/spy_21d_regime_2026-09-05/`: 0 files. Missing outputs cannot be reproduced or verified from this checkout; no missing evidence has been reconstructed.
+
 Frozen: 2026-09-05. Tag: `v1.0-ohlcv-negative-study`. Validation-only throughout:
 no test scoring, no deployment refit, no production changes.
 

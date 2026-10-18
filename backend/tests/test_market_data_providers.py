@@ -121,7 +121,7 @@ def test_cache_hit_survives_provider_failure(monkeypatch, tmp_path) -> None:
     )
     cache = MarketDataCache(tmp_path)
     cached = MarketDataResult(_bars(), "alpaca", "2026-08-31")
-    cache.save("MSFT", cached)
+    cache.save("MSFT", cached, namespace="alpaca:daily:auto:8:session-v2")
     failing = SimpleNamespace(
         name="alpaca",
         configured=True,
@@ -187,7 +187,15 @@ def test_in_progress_future_bar_is_trimmed_before_cache(monkeypatch, tmp_path) -
 
     assert result.data_as_of == "2026-08-31"
     assert result.frame.index[-1] == pd.Timestamp("2026-08-31")
-    assert cache.load("alpaca", "MSFT", required_session="2026-08-31") is not None
+    assert (
+        cache.load(
+            "alpaca",
+            "MSFT",
+            required_session="2026-08-31",
+            namespace="alpaca:daily:auto:8:session-v2",
+        )
+        is not None
+    )
 
 
 def test_future_dated_cache_entry_is_not_reused(monkeypatch, tmp_path) -> None:

@@ -12,6 +12,7 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -92,6 +93,21 @@ class CollectorClient:
                     payload = response.json()
                 except ValueError:
                     payload = {"error": "INVALID_JSON_RESPONSE"}
+                if response.status_code == 429 and attempt + 1 < attempts:
+                    retry_after = response.headers.get("Retry-After", "60")
+                    try:
+                        delay = float(retry_after)
+                    except ValueError:
+                        try:
+                            delay = (
+                                parsedate_to_datetime(retry_after) - datetime.now(UTC)
+                            ).total_seconds()
+                        except (ValueError, TypeError):
+                            delay = 60.0
+                    if delay > 120:
+                        return ApiResult(429, {"error": "RETRY_BUDGET_EXCEEDED"})
+                    time.sleep(max(0.0, delay))
+                    continue
                 if response.status_code < 500 or attempt + 1 >= attempts:
                     return ApiResult(response.status_code, payload)
             except (httpx.TimeoutException, httpx.TransportError) as exc:
@@ -377,12 +393,25 @@ def run_live_collection(
     return manifest
 
 
-def run_settlement(client: CollectorClient, *, token: str) -> dict[str, Any]:
+def run_settlement(
+    client: CollectorClient, *, token: str, previous: dict[str, Any] | None = None
+) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
+    completed = {
+        item["ticker"]: item
+        for item in (previous or {}).get("items", [])
+        if item.get("status") == "succeeded"
+    }
     for ticker in LIVE_UNIVERSE_V1:
+        if ticker in completed:
+            items.append(completed[ticker])
+            continue
+        if any(item["ticker"] not in completed for item in items):
+            time.sleep(6.1)  # At most ten settlement requests per minute.
         response = client.request(
             "POST",
             "/api/v1/volatility/score-ledger",
+            attempts=3,
             params={"ticker": ticker},
             token=token,
         )
@@ -466,6 +495,7 @@ def parse_args() -> argparse.Namespace:
         "--mode", choices=("dry-run", "live", "settle", "export"), default="dry-run"
     )
     parser.add_argument("--scheduled", action="store_true")
+    parser.add_argument("--resume-manifest", type=Path, default=None)
     parser.add_argument("--interval-seconds", type=float, default=2.3)
     parser.add_argument("--timeout-seconds", type=float, default=60.0)
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts/live-collection"))
@@ -522,7 +552,10 @@ def main() -> int:
             print(json.dumps({"status": "aborted", "reason": "collector_token_missing"}))
             return 1
         if args.mode == "settle":
-            result = run_settlement(client, token=token)
+            previous = (
+                json.loads(args.resume_manifest.read_text()) if args.resume_manifest else None
+            )
+            result = run_settlement(client, token=token, previous=previous)
             output = write_manifest(result, args.output_dir)
             print(json.dumps({"manifest": str(output), "status": result["status"]}))
             return 0 if result["status"] == "complete" else 1

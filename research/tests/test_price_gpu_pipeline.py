@@ -28,7 +28,16 @@ from research.price_forecasting.news_archive import (
 
 
 def _frame(rows: int = 700) -> pd.DataFrame:
-    index = pd.bdate_range("2022-01-03", periods=rows)
+    import pandas_market_calendars as mcal
+
+    index = (
+        mcal.get_calendar("NYSE")
+        .schedule(
+            start_date="2022-01-03",
+            end_date=pd.Timestamp("2022-01-03") + pd.Timedelta(days=rows * 2),
+        )
+        .index[:rows]
+    )
     trend = 100.0 * np.exp(np.linspace(0.0, 0.35, rows))
     wave = 1.0 + 0.01 * np.sin(np.arange(rows) / 9.0)
     close = trend * wave
@@ -430,3 +439,56 @@ def test_evaluation_and_refit_checkpoints_are_distinct(tmp_path, monkeypatch) ->
     assert report["untouched_test"]["evaluated_checkpoint"] == "selection_model.pt"
     assert not report["untouched_test"]["evaluates_deployment_refit"]
     assert report["final_refit"]["epochs"] == 1
+
+
+def test_staggered_ipo_and_missing_sessions_never_leak_global_future():
+    early = _frame(1600)
+    late = _frame(700)
+    late.index = pd.bdate_range("2025-01-02", periods=700)
+    late = late.drop(late.index[100:140:2])
+    dataset = build_global_price_dataset({"AAPL": early, "ARM": late})
+    assert (
+        dataset.target_end_dates[dataset.split_train].max()
+        < dataset.origin_dates[dataset.split_validation].min()
+    )
+    assert (
+        dataset.target_end_dates[dataset.split_validation].max()
+        < dataset.origin_dates[dataset.split_test].min()
+    )
+
+
+def test_checkpoint_overlap_and_schema_are_rejected(tmp_path, monkeypatch):
+    from research.price_forecasting.checkpoint_contract import validate_checkpoint
+
+    dataset = build_global_price_dataset({"MSFT": _frame()})
+    model = _build_model(torch, nn, 25, 1, PriceTrainingConfig())
+    scalers = {
+        "feature_mean": np.zeros(25),
+        "feature_std": np.ones(25),
+        "target_mean": np.zeros(7),
+        "target_std": np.ones(7),
+    }
+    path = tmp_path / "selection_model.pt"
+    pipeline._save_checkpoint(
+        torch, model, scalers, dataset, PriceTrainingConfig(), path, "validation_selected_model", 1
+    )
+    ckpt = torch.load(path, weights_only=True)
+    cutoff = str(dataset.origin_dates[dataset.split_validation].min())
+    validate_checkpoint(ckpt, feature_names=FEATURE_NAMES, historical_origin=cutoff)
+    with pytest.raises(ValueError, match="overlaps"):
+        validate_checkpoint(
+            ckpt, feature_names=FEATURE_NAMES, historical_origin=ckpt["training_target_max"]
+        )
+    with pytest.raises(ValueError, match="schema"):
+        validate_checkpoint(ckpt, feature_names=FEATURE_NAMES[::-1])
+    ckpt["artifact_role"] = "all_data_deployment_refit"
+    with pytest.raises(ValueError, match="overlaps"):
+        validate_checkpoint(ckpt, feature_names=FEATURE_NAMES, historical_origin=cutoff)
+
+
+def test_lse_news_cutoff_uses_london_close_and_half_day():
+    from research.price_forecasting.news_archive import _resolve_session_closes
+
+    closes = _resolve_session_closes(pd.DatetimeIndex(["2026-03-30", "2025-12-24"]), ticker="BP.L")
+    assert closes[0] == pd.Timestamp("2026-03-30T15:30:00")
+    assert closes[1] == pd.Timestamp("2025-12-24T12:30:00")

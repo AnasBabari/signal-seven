@@ -45,6 +45,16 @@ describe('getSharedEstimatePresentation', () => {
     expect(res.direction).toBe('down');
   });
 
+  it('keeps an asymmetric midpoint distinct when point direction disagrees', () => {
+    const forecast = { ...baseForecast, predicted_prices: Array(7).fill(510) };
+    const res = getSharedEstimatePresentation({ forecast, history: baseHistory });
+    expect(res.direction).toBe('down');
+    expect(res.pointEstimate).toBe(510);
+    expect(res.label).toBe('Range midpoint — experimental');
+    expect(res.midpointEvaluation).toBe('unavailable');
+    expect(getSharedEstimatePresentation({ forecast: baseForecast, history: baseHistory }).pointEstimate).toBeNull();
+  });
+
   it('marks unavailable when lower or upper bounds are missing or empty', () => {
     const withoutBounds = { ...baseForecast, lower_prices: [], upper_prices: [] };
     const res = getSharedEstimatePresentation({ forecast: withoutBounds });

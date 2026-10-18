@@ -42,7 +42,7 @@ export default function ForecastLedgerTrackRecord({ ticker, horizon, defaultOpen
     <details
       className="panel-card forecast-ledger-card ledger-expandable-section"
       id="forecastLedgerSection"
-      aria-label="Past price-movement forecasts"
+      aria-label="Recorded volatility forecasts"
       open={isOpen}
       onToggle={(e) => setIsOpen(e.currentTarget.open)}
     >
@@ -63,10 +63,10 @@ export default function ForecastLedgerTrackRecord({ ticker, horizon, defaultOpen
               clipRule="evenodd"
             />
           </svg>
-          Past price-movement forecasts
+          Recorded volatility forecasts
         </span>
         <span className="badge badge-neutral">
-          {ticker} {horizon ? `${horizon} ${Number(horizon) === 1 ? 'market day' : 'market days'}` : 'All time periods'}
+          {ticker} {horizon ? `${horizon} ${Number(horizon) === 1 ? 'trading session' : 'trading sessions'}` : 'All time periods'}
         </span>
       </summary>
 
@@ -188,7 +188,7 @@ export default function ForecastLedgerTrackRecord({ ticker, horizon, defaultOpen
                         }
                       >
                         <td className="mono">{entry.forecast_date}</td>
-                        <td>{entry.horizon} {Number(entry.horizon) === 1 ? 'market day' : 'market days'}</td>
+                        <td>{entry.horizon} {Number(entry.horizon) === 1 ? 'trading session' : 'trading sessions'}</td>
                         <td>
                           <span className="model-chip">{entry.model_name.replace('_', ' ')}</span>
                         </td>

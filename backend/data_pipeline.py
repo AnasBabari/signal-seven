@@ -211,6 +211,9 @@ def _download_ohlcv(ticker: str) -> pd.DataFrame:
             {
                 "data_provider": result.provider,
                 "data_as_of": result.data_as_of,
+                "data_feed": result.feed,
+                "price_adjustment": result.adjustment,
+                "data_fingerprint": result.data_fingerprint,
                 "market_data_cache": result.cache_status,
             }
         )
