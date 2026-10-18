@@ -123,8 +123,12 @@ information through `Server-Timing` headers.
 
 ## Local development
 
-Use Python 3.11 and Node.js 22.12 or later within the Node 22 series. Run the backend and frontend
-in separate terminals.
+Use Python 3.11 and Node.js 22.22.2 or later within the Node 22 series (recommended;
+`frontend/.nvmrc` pins the minimum). Node 24.15.0+ within Node 24 and Node 26.x are
+also supported and tested at their minimum versions in CI. Node 20, odd-numbered
+releases, and older Node 22/24 releases are not supported by the jsdom 30 test runtime.
+`npm ci` rejects unsupported runtimes rather than silently installing incompatible
+dependencies. Run the backend and frontend in separate terminals.
 
 ### Backend
 

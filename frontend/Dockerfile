@@ -1,5 +1,5 @@
 # Stage 1: Build static React SPA assets with Vite
-FROM node:22.22.0-alpine3.23@sha256:e4bf2a82ad0a4037d28035ae71529873c069b13eb0455466ae0bc13363826e34 AS build-stage
+FROM node:22.22.2-alpine3.23@sha256:8ea2348b068a9544dae7317b4f3aafcdc032df1647bb7d768a05a5cad1a7683f AS build-stage
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
