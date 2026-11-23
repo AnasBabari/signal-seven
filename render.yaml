@@ -8,7 +8,7 @@ services:
     branch: main
     autoDeployTrigger: checksPass
     healthCheckPath: /health
-    buildCommand: "pip install --no-cache-dir uv==0.11.16 && uv sync --project backend --active --frozen --no-dev --no-install-project"
+    buildCommand: "pip install --no-cache-dir uv==0.11.16 && uv sync --project backend --active --locked --no-dev --no-install-project"
     # Install from the same frozen uv.lock used by CI and the Docker image into
     # Render's active virtual environment. Nested project .venv directories are
     # not retained in the native runtime image.

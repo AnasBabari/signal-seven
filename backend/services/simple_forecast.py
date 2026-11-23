@@ -255,18 +255,17 @@ TICKER_METADATA: dict[str, dict[str, str]] = {
 
 
 def _load_manifest_tickers() -> tuple[str, ...]:
-    try:
-        manifest = (
-            Path(__file__).resolve().parents[2]
-            / "data"
-            / "tri_exchange"
-            / "manifest_broad_300.json"
-        )
-        if manifest.is_file():
-            data = json.loads(manifest.read_text(encoding="utf-8"))
-            return tuple(data.get("valid_tickers", ()))
-    except Exception:
-        pass
+    candidates = (
+        Path(__file__).resolve().parents[1] / "data" / "tri_exchange" / "manifest_broad_300.json",
+        Path(__file__).resolve().parents[2] / "data" / "tri_exchange" / "manifest_broad_300.json",
+    )
+    for manifest in candidates:
+        try:
+            if manifest.is_file():
+                data = json.loads(manifest.read_text(encoding="utf-8"))
+                return tuple(data.get("valid_tickers", ()))
+        except Exception:
+            continue
     return ()
 
 

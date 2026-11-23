@@ -1063,14 +1063,6 @@ class ForecastLedger:
         A logical-key collision is accepted only when every immutable field
         matches; otherwise the whole transaction fails closed.
         """
-        columns = (
-            "id, forecast_date, ticker, horizon, target_date, model_name, "
-            "predicted_volatility, recent_realized_volatility, origin_price, "
-            "lower_scenario_price, upper_scenario_price, actual_realized_volatility, "
-            "forecast_error, abs_error, qlike_loss, status, record_source, model_version, "
-            "feature_set_version, code_commit, data_as_of, data_provider, "
-            "forecast_fingerprint, created_at"
-        )
         records_list = list(records)
         if not records_list:
             return 0
@@ -1107,10 +1099,20 @@ class ForecastLedger:
                     record.created_at,
                 )
                 insert_cursor = conn.execute(
-                    f"INSERT INTO forecast_ledger ({columns}) VALUES "
-                    f"({', '.join('?' for _ in values)}) "
-                    "ON CONFLICT (forecast_date, ticker, horizon, model_name, record_source) "
-                    "DO NOTHING",
+                    """
+                    INSERT INTO forecast_ledger (
+                        id, forecast_date, ticker, horizon, target_date, model_name,
+                        predicted_volatility, recent_realized_volatility, origin_price,
+                        lower_scenario_price, upper_scenario_price, actual_realized_volatility,
+                        forecast_error, abs_error, qlike_loss, status, record_source, model_version,
+                        feature_set_version, code_commit, data_as_of, data_provider,
+                        forecast_fingerprint, created_at
+                    ) VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    )
+                    ON CONFLICT (forecast_date, ticker, horizon, model_name, record_source)
+                    DO NOTHING
+                    """,
                     values,
                 )
                 inserted_now = insert_cursor.rowcount == 1

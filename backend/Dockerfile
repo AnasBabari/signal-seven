@@ -6,7 +6,7 @@ RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
 WORKDIR /app
 
 COPY pyproject.toml uv.lock ./
-RUN pip install --no-cache-dir uv==0.11.16 && uv sync --frozen --no-dev --no-install-project
+RUN pip install --no-cache-dir uv==0.11.16 && uv sync --locked --no-dev --no-install-project
 
 COPY . .
 

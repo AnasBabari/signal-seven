@@ -131,8 +131,7 @@ in separate terminals.
 From the repository root:
 
 ```powershell
-python -m venv backend/.venv
-backend/.venv/Scripts/python.exe -m pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+uv sync --project backend --locked --no-install-project
 cd backend
 .venv/Scripts/python.exe -m uvicorn api:app --reload --port 8000
 ```
