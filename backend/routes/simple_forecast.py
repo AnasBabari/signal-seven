@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import time
 from typing import Any
 
@@ -50,7 +51,10 @@ def forecast(
     try:
         route_started = time.perf_counter()
         t_data = time.perf_counter()
-        frame = _download_ohlcv(symbol)
+        if "allow_post_close_grace" in inspect.signature(_download_ohlcv).parameters:
+            frame = _download_ohlcv(symbol, allow_post_close_grace=True)
+        else:
+            frame = _download_ohlcv(symbol)
         data_ms = (time.perf_counter() - t_data) * 1000.0
         t_train = time.perf_counter()
         if model == "auto":
@@ -64,6 +68,8 @@ def forecast(
             "timing": {**result.get("timing", {}), "data_ms": data_ms, "total_ms": total_ms},
         }
         response = JSONResponse(content=result)
+        if bool(frame.attrs.get("post_close_grace_used", False)):
+            response.headers["Cache-Control"] = "no-store"
         # Service body timings and request-level Server-Timing describe this invocation.
         response.headers["Server-Timing"] = (
             f"data;dur={data_ms:.0f}, train_or_cache;dur={train_ms:.0f}, total;dur={total_ms:.0f}"

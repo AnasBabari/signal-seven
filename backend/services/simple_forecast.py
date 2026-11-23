@@ -32,6 +32,7 @@ from sklearn.preprocessing import RobustScaler
 
 from calendars import future_trading_dates
 from config import settings
+from market_data.quote_units import LSE_QUOTE_UNIT_OVERRIDES
 from services import forecast_artifacts
 from services.training_budget import training_slot
 
@@ -280,8 +281,15 @@ MIN_HISTORY_ROWS = 500
 
 def get_ticker_meta(symbol: str) -> dict[str, str]:
     sym = symbol.strip().upper()
+    override = LSE_QUOTE_UNIT_OVERRIDES.get(sym)
     if sym in TICKER_METADATA:
-        return dict(TICKER_METADATA[sym])
+        meta = dict(TICKER_METADATA[sym])
+        if override is not None:
+            meta["currency"] = override["currency"]
+            meta["currency_symbol"] = override["currency_symbol"]
+        return meta
+    if override is not None:
+        return dict(override)
     if sym.endswith(".L"):
         return {
             "name": sym,
@@ -931,6 +939,12 @@ def _fit_forecast(symbol, frame, normalized_model, data_as_of, cache_key, starte
             "data_feed": frame.attrs.get("data_feed", "unknown"),
             "price_adjustment": frame.attrs.get("price_adjustment", "unknown"),
             "data_fingerprint": frame.attrs.get("data_fingerprint", ""),
+            "raw_source_fingerprint": str(frame.attrs.get("raw_source_fingerprint", "")),
+            "data_quality_audit": [
+                record.to_dict() if hasattr(record, "to_dict") else record
+                for record in frame.attrs.get("data_quality_audit", ())
+            ],
+            "post_close_grace_used": bool(frame.attrs.get("post_close_grace_used", False)),
         },
         "news": {
             "role": "context_only",

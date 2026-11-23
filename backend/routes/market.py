@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import threading
 from typing import Any
 
 import yfinance as default_yf  # type: ignore[import-untyped]
 from cachetools import TTLCache
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 
 from config import settings
 from market_data.base import (
@@ -16,6 +17,7 @@ from market_data.base import (
     MarketDataServiceError,
     MarketDataSymbolNotFound,
 )
+from market_data.quote_units import resolve_quote_unit
 from routes.common import limiter, validate_ticker
 
 logger = logging.getLogger(__name__)
@@ -37,7 +39,10 @@ def _fetch_history_daily(symbol: str):
     """Use the same exchange-aware completed daily bars as every forecast."""
     import data_pipeline as dp
 
-    return dp.market_data_service.fetch_daily_bars(symbol, years=dp.HISTORICAL_YEARS)
+    fetch_fn = dp.market_data_service.fetch_daily_bars
+    if "allow_post_close_grace" in inspect.signature(fetch_fn).parameters:
+        return fetch_fn(symbol, years=dp.HISTORICAL_YEARS, allow_post_close_grace=True)
+    return fetch_fn(symbol, years=dp.HISTORICAL_YEARS)
 
 
 def _fetch_history_intraday(symbol: str) -> list[dict[str, str | float]] | None:
@@ -53,6 +58,7 @@ def _fetch_history_intraday(symbol: str) -> list[dict[str, str | float]] | None:
 @limiter.limit("30/minute")
 def history(
     request: Request,
+    response: Response,
     ticker: str = Query(default="AAPL", min_length=1, max_length=12),
 ) -> Any:
     """Return downsampled daily closes plus last-session intraday bars.
@@ -73,13 +79,25 @@ def history(
         if len(daily) > MAX_HISTORY_BARS:
             daily = daily[-MAX_HISTORY_BARS:]
         intraday = _fetch_history_intraday(symbol)
+        currency, currency_symbol = resolve_quote_unit(symbol)
+        grace_used = bool(getattr(result, "post_close_grace_used", False))
+        if grace_used:
+            response.headers["Cache-Control"] = "no-store"
+        audit = getattr(result, "data_quality_audit", ())
         return {
             "ticker": symbol,
             "as_of": result.data_as_of,
             "provider": result.provider,
             "feed": result.feed,
             "adjustment": result.adjustment,
+            "currency": currency,
+            "currency_symbol": currency_symbol,
             "data_fingerprint": result.data_fingerprint,
+            "raw_source_fingerprint": getattr(result, "raw_source_fingerprint", ""),
+            "data_quality_audit": [
+                record.to_dict() if hasattr(record, "to_dict") else record for record in audit
+            ],
+            "post_close_grace_used": grace_used,
             "completed_daily_bars_only": True,
             "market_data_cache": result.cache_status or "unknown",
             "first_date": daily[0]["d"] if daily else None,

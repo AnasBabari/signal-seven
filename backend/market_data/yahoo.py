@@ -13,7 +13,7 @@ from market_data.base import (
     MarketDataSymbolNotFound,
     MarketDataTimeoutError,
 )
-from market_data.normalization import normalize_daily_bars
+from market_data.normalization import normalize_daily_bars_with_audit
 
 try:
     from yfinance.exceptions import (  # type: ignore[import-untyped]
@@ -53,7 +53,8 @@ class YahooProvider:
     def configured(self) -> bool:
         return True
 
-    def fetch_daily_bars(self, symbol: str, *, years: int) -> MarketDataResult:
+    def fetch_raw_daily_bars(self, symbol: str, *, years: int) -> MarketDataResult:
+        """Fetch raw daily bars from Yahoo without repair=True or normalization."""
         first_error: Exception | None = None
         try:
             data = yf.download(
@@ -82,14 +83,33 @@ class YahooProvider:
             if first_error is not None:
                 raise _classify_yahoo_error(first_error) from first_error
             raise MarketDataSymbolNotFound(f"Yahoo has no daily bars for {symbol}")
+        return MarketDataResult(
+            frame=data,
+            provider=self.name,
+            feed="yahoo_daily",
+            adjustment="auto_adjust_split_dividend",
+            data_as_of="",
+            timestamp_kind="session_label",
+        )
+
+    def fetch_daily_bars(self, symbol: str, *, years: int) -> MarketDataResult:
+        raw = self.fetch_raw_daily_bars(symbol, years=years)
         try:
-            normalized = normalize_daily_bars(data, provider=self.name, symbol=symbol)
+            normalized, raw_fp, audit = normalize_daily_bars_with_audit(
+                raw.frame,
+                provider=self.name,
+                symbol=symbol,
+                timestamp_kind="session_label",
+            )
         except MarketDataProviderError as err:
             raise MarketDataServiceError("Yahoo returned unusable OHLCV data") from err
         return MarketDataResult(
             frame=normalized,
             provider=self.name,
-            feed="yahoo_daily",
-            adjustment="auto_adjust_split_dividend",
+            feed=raw.feed,
+            adjustment=raw.adjustment,
             data_as_of=normalized.index[-1].date().isoformat(),
+            raw_source_fingerprint=raw_fp,
+            data_quality_audit=audit,
+            timestamp_kind="session_label",
         )

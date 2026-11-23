@@ -1,0 +1,73 @@
+{
+  "source": "Yahoo Finance (yfinance auto_adjust=True) live audit",
+  "cross_source_note": "Stooq unauthenticated CSV endpoints (e.g. shel.uk) returned HTTP 404 on audit date; fixtures preserve the exact observed Yahoo anomalies.",
+  "fixtures": {
+    "SHEL.L": {
+      "rows": 2020,
+      "anomalies": [
+        {
+          "date": "2024-05-01",
+          "Open": 2871.919,
+          "High": 2814.4806,
+          "Low": 2811.4838,
+          "Close": 2815.979,
+          "Volume": 3437262.0,
+          "issue": "High < Open (2.00% drift)"
+        }
+      ]
+    },
+    "BP.L": {
+      "rows": 2019,
+      "anomalies": [
+        {
+          "date": "2024-05-01",
+          "Open": 519.218,
+          "High": 509.5326,
+          "Low": 508.0349,
+          "Close": 508.634,
+          "Volume": 4659383.0,
+          "issue": "High < Open (1.87% drift)"
+        }
+      ],
+      "synthetic_empty_session": {
+        "Open": null,
+        "High": null,
+        "Low": null,
+        "Close": null,
+        "Volume": 0.0
+      }
+    },
+    "RR.L": {
+      "rows": 2019,
+      "anomalies": [
+        {
+          "date": "2020-06-15",
+          "Open": 105.5367,
+          "High": 127.9008,
+          "Low": 105.6314,
+          "Close": 111.0949,
+          "Volume": 20000000.0,
+          "issue": "Low > Open"
+        },
+        {
+          "date": "2024-05-01",
+          "Open": 412.9148,
+          "High": 410.9152,
+          "Low": 408.4157,
+          "Close": 407.4159,
+          "Volume": 18000000.0,
+          "issue": "High < Open AND Low > Close (1 unique affected date)"
+        },
+        {
+          "date": "2024-05-02",
+          "Open": 405.9162,
+          "High": 405.9162,
+          "Low": 405.9162,
+          "Close": 406.4161,
+          "Volume": 15000000.0,
+          "issue": "High < Close"
+        }
+      ]
+    }
+  }
+}

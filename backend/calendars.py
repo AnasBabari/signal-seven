@@ -1,7 +1,8 @@
-"""Exchange-aware future trading-date generation."""
+"""Exchange-aware future trading-date generation and session close context."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -17,11 +18,22 @@ SUFFIX_CALENDARS = {
 }
 
 
-def latest_completed_trading_session(
+@dataclass(frozen=True)
+class SessionContext:
+    """Completed-session boundary and post-close grace window for an exchange."""
+
+    required_session: pd.Timestamp
+    previous_session: pd.Timestamp | None
+    market_close_utc: pd.Timestamp
+    in_post_close_grace: bool
+
+
+def completed_session_context(
     now: datetime | pd.Timestamp | None = None,
     exchange: str = "NYSE",
-) -> pd.Timestamp:
-    """Return the latest session whose regular close has passed for the given exchange."""
+    grace_minutes: int = 25,
+) -> SessionContext:
+    """Return the latest completed session, prior session, and early-close-aware grace state."""
     instant = pd.Timestamp(now if now is not None else datetime.now(UTC))
     instant = instant.tz_localize(UTC) if instant.tzinfo is None else instant.tz_convert(UTC)
 
@@ -44,7 +56,29 @@ def latest_completed_trading_session(
     completed = schedule.loc[schedule["market_close"] <= instant]
     if completed.empty:
         raise ValueError(err_msg)
-    return pd.Timestamp(completed.index[-1]).tz_localize(None).normalize()
+    required_session = pd.Timestamp(completed.index[-1]).tz_localize(None).normalize()
+    previous_session = (
+        pd.Timestamp(completed.index[-2]).tz_localize(None).normalize()
+        if len(completed) >= 2
+        else None
+    )
+    market_close_utc = pd.Timestamp(completed["market_close"].iloc[-1]).tz_convert(UTC)
+    elapsed = instant - market_close_utc
+    in_post_close_grace = timedelta(0) <= elapsed <= timedelta(minutes=grace_minutes)
+    return SessionContext(
+        required_session=required_session,
+        previous_session=previous_session,
+        market_close_utc=market_close_utc,
+        in_post_close_grace=in_post_close_grace,
+    )
+
+
+def latest_completed_trading_session(
+    now: datetime | pd.Timestamp | None = None,
+    exchange: str = "NYSE",
+) -> pd.Timestamp:
+    """Return the latest session whose regular close has passed for the given exchange."""
+    return completed_session_context(now=now, exchange=exchange).required_session
 
 
 def resolve_calendar(ticker: str) -> tuple[str, str]:

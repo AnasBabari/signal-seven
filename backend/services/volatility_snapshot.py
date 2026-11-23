@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -302,6 +303,7 @@ class VolatilityInferenceSnapshot:
     data_fingerprint: str = ""
     data_feed: str = "unknown"
     price_adjustment: str = "unknown"
+    post_close_grace_used: bool = False
 
     def __post_init__(self) -> None:
         if self.features.shape != (VOLATILITY_WINDOW_SIZE, len(self.feature_names)):
@@ -503,26 +505,35 @@ def _store_snapshot(key: str, snapshot: VolatilityInferenceSnapshot) -> None:
             _snapshot_cache.popitem(last=False)
 
 
-def build_volatility_inference_snapshot(ticker: str) -> VolatilityInferenceSnapshot:
+def build_volatility_inference_snapshot(
+    ticker: str, *, allow_post_close_grace: bool = False
+) -> VolatilityInferenceSnapshot:
     """Return the latest model input, reusing an identical recent build."""
     symbol = ticker.upper().strip()
     if not symbol:
         raise ValueError("volatility ticker is required")
-    raw = _download_ohlcv(symbol)
+    if "allow_post_close_grace" in inspect.signature(_download_ohlcv).parameters:
+        raw = _download_ohlcv(symbol, allow_post_close_grace=allow_post_close_grace)
+    else:
+        raw = _download_ohlcv(symbol)
+    grace_used = bool(raw.attrs.get("post_close_grace_used", False))
     key = _frame_fingerprint(symbol, raw)
 
-    cached = _cached_snapshot(key)
-    if cached is not None:
-        return cached
+    if not grace_used:
+        cached = _cached_snapshot(key)
+        if cached is not None:
+            return cached
 
     with _snapshot_build_lock(key):
         # Re-check under the build lock: a concurrent request may have just
         # finished the same work while we waited.
-        cached = _cached_snapshot(key)
-        if cached is not None:
-            return cached
+        if not grace_used:
+            cached = _cached_snapshot(key)
+            if cached is not None:
+                return cached
         snapshot = _build_volatility_inference_snapshot(symbol, raw)
-        _store_snapshot(key, snapshot)
+        if not grace_used:
+            _store_snapshot(key, snapshot)
         return snapshot
 
 
@@ -593,4 +604,5 @@ def _build_volatility_inference_snapshot(
         data_fingerprint=str(raw.attrs.get("data_fingerprint", "")),
         data_feed=str(raw.attrs.get("data_feed", "unknown")),
         price_adjustment=str(raw.attrs.get("price_adjustment", "unknown")),
+        post_close_grace_used=bool(raw.attrs.get("post_close_grace_used", False)),
     )

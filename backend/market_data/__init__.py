@@ -1,6 +1,7 @@
 """Canonical market-data providers and session-aware cache."""
 
 from market_data.base import (
+    BarRepairRecord,
     MarketDataConfigurationError,
     MarketDataProvider,
     MarketDataProviderError,
@@ -13,6 +14,7 @@ from market_data.base import (
 from market_data.service import MarketDataService, build_market_data_service
 
 __all__ = [
+    "BarRepairRecord",
     "MarketDataConfigurationError",
     "MarketDataProvider",
     "MarketDataProviderError",

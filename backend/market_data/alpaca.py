@@ -17,7 +17,7 @@ from market_data.base import (
     MarketDataSymbolNotFound,
     MarketDataTimeoutError,
 )
-from market_data.normalization import normalize_daily_bars
+from market_data.normalization import normalize_daily_bars_with_audit
 
 
 class AlpacaProvider:
@@ -67,7 +67,8 @@ class AlpacaProvider:
             for phrase in ("symbol not found", "unknown symbol", "invalid symbol", "no data")
         )
 
-    def fetch_daily_bars(self, symbol: str, *, years: int) -> MarketDataResult:
+    def fetch_raw_daily_bars(self, symbol: str, *, years: int) -> MarketDataResult:
+        """Fetch raw paginated bars from Alpaca with UTC instant timestamps preserved."""
         if not self.configured:
             raise MarketDataConfigurationError("Alpaca market-data credentials are not configured")
         end = datetime.now(UTC)
@@ -129,11 +130,6 @@ class AlpacaProvider:
                 except ValueError as err:
                     raise MarketDataProviderError("Alpaca returned malformed JSON") from err
                 page = payload.get("bars") if isinstance(payload, dict) else None
-                # Alpaca normally returns an empty list for a valid symbol with
-                # no bars.  Some account/feed combinations have also returned
-                # an empty object; treat either empty representation as an
-                # authoritative no-data response, and do not follow a stale
-                # pagination token from an empty page.
                 if isinstance(payload, dict) and "bars" in payload and page in (None, [], {}):
                     break
                 if not isinstance(page, list):
@@ -167,13 +163,30 @@ class AlpacaProvider:
             )
         except (KeyError, TypeError, ValueError) as err:
             raise MarketDataProviderError("Alpaca returned incomplete daily bars") from err
-        normalized = normalize_daily_bars(
-            frame, provider=self.name, symbol=symbol, timestamp_kind="instant"
+        return MarketDataResult(
+            frame=frame,
+            provider=self.name,
+            feed=self.feed,
+            adjustment=self.adjustment,
+            data_as_of="",
+            timestamp_kind="instant",
+        )
+
+    def fetch_daily_bars(self, symbol: str, *, years: int) -> MarketDataResult:
+        raw = self.fetch_raw_daily_bars(symbol, years=years)
+        normalized, raw_fp, audit = normalize_daily_bars_with_audit(
+            raw.frame,
+            provider=self.name,
+            symbol=symbol,
+            timestamp_kind="instant",
         )
         return MarketDataResult(
             frame=normalized,
             provider=self.name,
-            feed=self.feed,
-            adjustment=self.adjustment,
+            feed=raw.feed,
+            adjustment=raw.adjustment,
             data_as_of=normalized.index[-1].date().isoformat(),
+            raw_source_fingerprint=raw_fp,
+            data_quality_audit=audit,
+            timestamp_kind="session_label",
         )

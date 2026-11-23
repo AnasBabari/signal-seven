@@ -11,12 +11,14 @@ import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
-from market_data.base import MarketDataProviderError, MarketDataResult
-from market_data.normalization import REQUIRED_OHLCV, normalize_daily_bars
+from market_data.base import BarRepairRecord, MarketDataResult
+from market_data.normalization import REQUIRED_OHLCV
 
 MAX_CACHE_FILE_BYTES = 25 * 1024 * 1024
+CACHE_SCHEMA_VERSION = 3
 
 
 class MarketDataCache:
@@ -26,7 +28,7 @@ class MarketDataCache:
         self.directory = Path(directory) if directory else None
         self.enabled = bool(enabled and self.directory)
         self._lock = threading.RLock()
-        if self.enabled:
+        if self.enabled and self.directory is not None:
             self.directory.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
@@ -52,7 +54,7 @@ class MarketDataCache:
                 payload = json.loads(path.read_text(encoding="utf-8"))
                 if payload.get("provider") != provider or payload.get("symbol") != symbol.upper():
                     return None
-                if payload.get("schema_version") != 2:
+                if payload.get("schema_version") != CACHE_SCHEMA_VERSION:
                     return None
                 data_as_of = str(payload["data_as_of"])
                 # A cache entry from a later calendar date can contain an
@@ -61,24 +63,44 @@ class MarketDataCache:
                 if data_as_of != required_session:
                     return None
                 rows = payload["rows"]
+                if not isinstance(rows, list) or not rows:
+                    return None
+                if any(not isinstance(row, list) or len(row) != 6 for row in rows):
+                    return None
+                index = pd.DatetimeIndex(
+                    pd.to_datetime([row[0] for row in rows], format="%Y-%m-%d", errors="raise")
+                )
                 frame = pd.DataFrame(
                     [row[1:] for row in rows],
                     columns=list(REQUIRED_OHLCV),
-                    index=[row[0] for row in rows],
+                    index=index,
+                    dtype=float,
                 )
-                normalized = normalize_daily_bars(frame, provider=provider, symbol=symbol)
-                if normalized.index[-1].date().isoformat() != data_as_of:
+                if (
+                    frame.empty
+                    or not frame.index.is_monotonic_increasing
+                    or frame.index.has_duplicates
+                    or frame.index[-1].date().isoformat() != data_as_of
+                    or not np.isfinite(frame.to_numpy(dtype=float)).all()
+                ):
                     return None
-            except (OSError, ValueError, KeyError, TypeError, MarketDataProviderError):
+                raw_audit = payload.get("data_quality_audit", ())
+                audit = tuple(BarRepairRecord.from_dict(item) for item in raw_audit)
+                raw_fp = str(payload.get("raw_source_fingerprint", ""))
+            except (OSError, ValueError, KeyError, TypeError):
                 return None
         return MarketDataResult(
-            frame=normalized,
+            frame=frame,
             provider=provider,
             data_as_of=data_as_of,
             cache_status="hit",
             feed=payload.get("feed", "unknown"),
             adjustment=payload.get("adjustment", "unknown"),
             data_fingerprint=payload.get("data_fingerprint", ""),
+            raw_source_fingerprint=raw_fp,
+            data_quality_audit=audit,
+            timestamp_kind="session_label",
+            post_close_grace_used=False,
         )
 
     def save(self, symbol: str, result: MarketDataResult, *, namespace: str | None = None) -> None:
@@ -86,10 +108,12 @@ class MarketDataCache:
             return
         path = self._path(namespace or result.provider, symbol)
         payload = {
-            "schema_version": 2,
+            "schema_version": CACHE_SCHEMA_VERSION,
             "feed": result.feed,
             "adjustment": result.adjustment,
             "data_fingerprint": result.data_fingerprint,
+            "raw_source_fingerprint": result.raw_source_fingerprint,
+            "data_quality_audit": [record.to_dict() for record in result.data_quality_audit],
             "provider": result.provider,
             "symbol": symbol.upper(),
             "data_as_of": result.data_as_of,
@@ -115,7 +139,13 @@ class MarketDataCache:
                 with contextlib.suppress(FileNotFoundError):
                     os.unlink(temp_name)
 
-    def fresh_entry_count(self, *, required_session: str) -> int:
+    def fresh_entry_count(
+        self,
+        *,
+        required_session: str,
+        providers: set[str] | None = None,
+        exclude_lse_symbols: bool = False,
+    ) -> int:
         if not self.enabled or self.directory is None:
             return 0
         count = 0
@@ -125,8 +155,17 @@ class MarketDataCache:
                     if path.stat().st_size > MAX_CACHE_FILE_BYTES:
                         continue
                     payload = json.loads(path.read_text(encoding="utf-8"))
-                    if str(payload.get("data_as_of", "")) == required_session:
-                        count += 1
+                    if payload.get("schema_version") != CACHE_SCHEMA_VERSION:
+                        continue
+                    if str(payload.get("data_as_of", "")) != required_session:
+                        continue
+                    if providers is not None and payload.get("provider") not in providers:
+                        continue
+                    if exclude_lse_symbols and str(payload.get("symbol", "")).upper().endswith(
+                        ".L"
+                    ):
+                        continue
+                    count += 1
                 except (OSError, ValueError, TypeError):
                     continue
         return count

@@ -9,6 +9,7 @@ benchmark is being rebuilt.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import math
 import os
@@ -72,6 +73,7 @@ class _PreparedForecast:
     result: dict[str, Any]
     data_as_of: str
     record_kwargs: dict[str, Any]
+    post_close_grace_used: bool = False
 
 
 def require_collector_auth(
@@ -107,8 +109,22 @@ def require_collector_auth(
         )
 
 
-def _prepare_forecast(symbol: str, horizon: int, requested_model: str) -> _PreparedForecast:
-    snapshot = build_volatility_inference_snapshot(symbol)
+def _prepare_forecast(
+    symbol: str,
+    horizon: int,
+    requested_model: str,
+    *,
+    allow_post_close_grace: bool = False,
+) -> _PreparedForecast:
+    if (
+        "allow_post_close_grace"
+        in inspect.signature(build_volatility_inference_snapshot).parameters
+    ):
+        snapshot = build_volatility_inference_snapshot(
+            symbol, allow_post_close_grace=allow_post_close_grace
+        )
+    else:
+        snapshot = build_volatility_inference_snapshot(symbol)
     forecast_result = build_live_volatility_forecast(
         snapshot,
         horizon=horizon,
@@ -170,11 +186,14 @@ def _prepare_forecast(symbol: str, horizon: int, requested_model: str) -> _Prepa
             else data_provider
         ),
     }
+    grace_used = bool(getattr(snapshot, "post_close_grace_used", False))
+    evidence["post_close_grace_used"] = grace_used
     evidence["forecast_fingerprint"] = compute_forecast_fingerprint(**record_kwargs)
     return _PreparedForecast(
         result=forecast_result,
         data_as_of=data_as_of,
         record_kwargs=record_kwargs,
+        post_close_grace_used=grace_used,
     )
 
 
@@ -186,10 +205,18 @@ def _execute_forecast(
     record_live: bool,
 ) -> Any:
     try:
-        prepared = _prepare_forecast(symbol, horizon, requested_model)
+        allow_grace = not record_live
+        if "allow_post_close_grace" in inspect.signature(_prepare_forecast).parameters:
+            prepared = _prepare_forecast(
+                symbol, horizon, requested_model, allow_post_close_grace=allow_grace
+            )
+        else:
+            prepared = _prepare_forecast(symbol, horizon, requested_model)
         evidence = prepared.result.setdefault("evidence", {})
         if not record_live:
             evidence["ledger_write"] = "disabled_public_preview"
+            if prepared.post_close_grace_used:
+                return JSONResponse(content=prepared.result, headers={"Cache-Control": "no-store"})
             return prepared.result
 
         if date.fromisoformat(prepared.data_as_of) < LIVE_START_DATE:
