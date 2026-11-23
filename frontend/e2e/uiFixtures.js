@@ -32,6 +32,35 @@ export function volatilityPayload(horizon) {
   };
 }
 
+export function volatilityBatchPayload(horizons = [5, 10, 20], failedHorizon = null, ticker = 'MSFT', currentPrice = 450) {
+  const forecasts = {};
+  const errors = {};
+  for (const horizon of horizons) {
+    if (horizon === failedHorizon) {
+      errors[String(horizon)] = { code: 'HORIZON_UNAVAILABLE', message: 'Fixture horizon unavailable' };
+    } else {
+      const entry = volatilityPayload(horizon);
+      entry.ticker = ticker;
+      entry.current_price = currentPrice;
+      if (currentPrice !== 450) {
+        for (const key of Object.keys(entry.forecast.price_quantiles)) {
+          entry.forecast.price_quantiles[key] = Array(horizon).fill(currentPrice);
+        }
+      }
+      forecasts[String(horizon)] = entry;
+    }
+  }
+  return {
+    ticker,
+    as_of: origin,
+    requested_model: 'auto',
+    horizons,
+    forecasts,
+    errors,
+    post_close_grace_used: false,
+  };
+}
+
 export function installFixtures(page, failedHorizon = null, priceOverrides = {}) {
   return page.route('**/*', async (route) => {
     const url = new URL(route.request().url());
@@ -42,6 +71,10 @@ export function installFixtures(page, failedHorizon = null, priceOverrides = {})
         ticker: 'MSFT', as_of: origin,
         daily: historyDates.map((d, i) => ({ d, c: 447.9 + i * 0.3 })),
       } });
+    }
+    if (url.pathname.endsWith('/volatility/forecast/batch')) {
+      const horizons = (url.searchParams.get('horizons') || '5,10,20').split(',').map(Number);
+      return route.fulfill({ json: volatilityBatchPayload(horizons, failedHorizon) });
     }
     if (url.pathname.includes('/volatility/forecast')) {
       const horizon = Number(url.searchParams.get('horizon') || 5);
@@ -60,7 +93,12 @@ export function installFixtures(page, failedHorizon = null, priceOverrides = {})
       } });
     }
     if (url.pathname.endsWith('/volatility/ledger')) {
-      return route.fulfill({ json: { ticker: 'MSFT', entries: [], live_track_record: {}, replay_track_record: {} } });
+      return route.fulfill({ json: {
+        ticker: 'MSFT',
+        entries: [],
+        live_track_record: { total_forecasts: 0 },
+        replay_track_record: { total_forecasts: 0 },
+      } });
     }
     if (url.pathname.endsWith('/news')) return route.fulfill({ json: {
       status: 'available', provider: 'verification_fixture', ticker: 'MSFT',

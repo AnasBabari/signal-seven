@@ -5,9 +5,9 @@ import LazyLineChart from './LazyLineChart';
 
 it('recovers from chunk failure with a retry while identifying the numerical fallback and notifying onErrorChange', async () => {
   const onErrorChange = vi.fn();
-  const load = vi.fn().mockRejectedValueOnce(new Error('Chunk unavailable')).mockResolvedValueOnce([
-    { Chart: { register: vi.fn() } }, { Line: React.forwardRef(() => <canvas aria-label="Recovered chart" />) },
-  ]);
+  const load = vi.fn()
+    .mockRejectedValueOnce(new Error('Chunk unavailable'))
+    .mockResolvedValueOnce({ Line: React.forwardRef(() => <canvas aria-label="Recovered chart" />) });
   render(<LazyLineChart loadEngine={load} onErrorChange={onErrorChange} />);
   expect(await screen.findByRole('alert')).toHaveTextContent('data table');
   expect(onErrorChange).toHaveBeenCalledWith(true);

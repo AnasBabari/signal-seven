@@ -1,7 +1,7 @@
 import React, { forwardRef, useState, useEffect, useRef } from 'react';
 import { withDeadline } from '../api/request';
 
-const loadChartEngine = () => Promise.all([import('chart.js'), import('react-chartjs-2')]);
+const loadChartEngine = () => import('./chart-engine.js');
 
 const LazyLineChart = forwardRef(function LazyLineChart({ loadEngine = loadChartEngine, onErrorChange = null, ...props }, ref) {
   const [error, setError] = useState(false);
@@ -15,32 +15,13 @@ const LazyLineChart = forwardRef(function LazyLineChart({ loadEngine = loadChart
     setError(false);
     onErrorChangeRef.current?.(false);
     withDeadline(() => loadEngine(), { timeoutMs: 20_000 })
-      .then(([chartJsModule, reactChartJsModule]) => {
+      .then((engineModule) => {
         if (!isMounted) return;
-        const {
-          Chart: ChartJS,
-          CategoryScale,
-          LinearScale,
-          PointElement,
-          LineElement,
-          Title,
-          Tooltip,
-          Legend,
-          Filler,
-        } = chartJsModule;
-
-        ChartJS.register(
-          CategoryScale,
-          LinearScale,
-          PointElement,
-          LineElement,
-          Title,
-          Tooltip,
-          Legend,
-          Filler
-        );
-
-        setLineComponent(() => reactChartJsModule.Line);
+        const Line = engineModule?.Line;
+        if (!Line) {
+          throw new Error('Chart engine module did not export Line.');
+        }
+        setLineComponent(() => Line);
       })
       .catch(() => {
         if (isMounted) {
@@ -54,10 +35,14 @@ const LazyLineChart = forwardRef(function LazyLineChart({ loadEngine = loadChart
     };
   }, [retry, loadEngine]);
 
-  if (error) return <div role="alert" className="chart-engine-error">
-    Chart could not load. Prices remain available in the data table below.
-    <button type="button" className="retry-action-btn" onClick={() => setRetry((value) => value + 1)}>Retry chart engine</button>
-  </div>;
+  if (error) return (
+    <div role="alert" className="chart-engine-error">
+      Chart could not load. Prices remain available in the data table below.
+      <button type="button" className="retry-action-btn" onClick={() => setRetry((value) => value + 1)}>
+        Retry chart engine
+      </button>
+    </div>
+  );
 
   if (!LineComponent) {
     return <div className="loading-text">Loading Chart Engine...</div>;

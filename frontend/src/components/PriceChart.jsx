@@ -13,22 +13,6 @@ import LazyLineChart from './LazyLineChart';
 const MIN_ZOOM_POINTS = 12;
 const COMPANY_NAME_FALLBACKS = { AIG: 'American International Group' };
 
-function themeIsDark() {
-  if (typeof document === 'undefined') return true;
-  return (document.documentElement.getAttribute('data-theme') || 'dark') !== 'light';
-}
-
-function useAppTheme() {
-  const [isDark, setIsDark] = useState(themeIsDark);
-  useEffect(() => {
-    if (typeof document === 'undefined' || typeof MutationObserver === 'undefined') return undefined;
-    const observer = new MutationObserver(() => setIsDark(themeIsDark()));
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
-    return () => observer.disconnect();
-  }, []);
-  return isDark;
-}
-
 function useIsMobileViewport() {
   const [isMobile, setIsMobile] = useState(() => (
     typeof window !== 'undefined' && typeof window.matchMedia === 'function'
@@ -97,7 +81,7 @@ const crosshairPlugin = {
     ctx.save();
     ctx.beginPath();
     ctx.setLineDash([4, 4]);
-    ctx.strokeStyle = chart.config.options?.isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)';
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
     ctx.lineWidth = 1;
     ctx.moveTo(x, chartArea.top);
     ctx.lineTo(x, chartArea.bottom);
@@ -151,17 +135,17 @@ const forecastRegionPlugin = {
     const xPos = scales.x.getPixelForValue(splitIdx);
     if (xPos == null || xPos < chartArea.left || xPos > chartArea.right) return;
     ctx.save();
-    ctx.fillStyle = chart.config.options?.isDark ? 'rgba(56,189,248,0.06)' : 'rgba(2,132,199,0.06)';
+    ctx.fillStyle = 'rgba(56,189,248,0.06)';
     ctx.fillRect(xPos, chartArea.top, chartArea.right - xPos, chartArea.bottom - chartArea.top);
     ctx.beginPath();
     ctx.setLineDash([4, 4]);
-    ctx.strokeStyle = chart.config.options?.isDark ? 'rgba(56,189,248,0.35)' : 'rgba(2,132,199,0.35)';
+    ctx.strokeStyle = 'rgba(56,189,248,0.35)';
     ctx.lineWidth = 1.5;
     ctx.moveTo(xPos, chartArea.top);
     ctx.lineTo(xPos, chartArea.bottom);
     ctx.stroke();
     ctx.setLineDash([]);
-    ctx.fillStyle = chart.config.options?.isDark ? '#38bdf8' : '#0284c7';
+    ctx.fillStyle = '#38bdf8';
     ctx.font = '600 10px Inter, sans-serif';
     ctx.textAlign = 'left';
     ctx.fillText('ESTIMATE', xPos + 6, chartArea.top + 14);
@@ -184,7 +168,6 @@ export default function PriceChart({
   historyError,
   onRetryHistory = null,
 }) {
-  const isDark = useAppTheme();
   const isMobile = useIsMobileViewport();
   const isControlledHistory = marketHistory !== undefined
     || historyLoading !== undefined
@@ -329,35 +312,20 @@ export default function PriceChart({
 
   const colors = useMemo(() => {
     const up = stats.up;
-    if (isDark) {
-      return {
-        line: up ? '#00f5a0' : '#ff5c5c',
-        areaTop: up ? 'rgba(0,245,160,0.18)' : 'rgba(255,92,92,0.18)',
-        grid: 'rgba(255,255,255,0.05)',
-        tick: '#94a3b8',
-        tooltipBg: '#0d0d1a',
-        tooltipTitle: '#e8e8f0',
-        tooltipBody: '#cbd5e1',
-        tooltipBorder: 'rgba(255,255,255,0.12)',
-        estimate: '#38bdf8',
-        bandBorder: 'rgba(56, 189, 248, 0.28)',
-        bandFill: 'rgba(56, 189, 248, 0.12)',
-      };
-    }
     return {
-      line: up ? '#10b981' : '#ef4444',
-      areaTop: up ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)',
-      grid: 'rgba(0,0,0,0.06)',
-      tick: '#64748b',
-      tooltipBg: '#ffffff',
-      tooltipTitle: '#1e293b',
-      tooltipBody: '#475569',
-      tooltipBorder: 'rgba(0,0,0,0.08)',
-      estimate: '#0284c7',
-      bandBorder: 'rgba(2, 132, 199, 0.28)',
-      bandFill: 'rgba(2, 132, 199, 0.12)',
+      line: up ? '#00f5a0' : '#ff5c5c',
+      areaTop: up ? 'rgba(0,245,160,0.18)' : 'rgba(255,92,92,0.18)',
+      grid: 'rgba(255,255,255,0.05)',
+      tick: '#94a3b8',
+      tooltipBg: '#0d0d1a',
+      tooltipTitle: '#e8e8f0',
+      tooltipBody: '#cbd5e1',
+      tooltipBorder: 'rgba(255,255,255,0.12)',
+      estimate: '#38bdf8',
+      bandBorder: 'rgba(56, 189, 248, 0.28)',
+      bandFill: 'rgba(56, 189, 248, 0.12)',
     };
-  }, [isDark, stats.up]);
+  }, [stats.up]);
 
   const chartData = useMemo(() => {
     const labels = [...points.labels];
@@ -670,7 +638,6 @@ export default function PriceChart({
     return {
       responsive: true,
       maintainAspectRatio: false,
-      isDark,
       animation: (isInteracting || isZoomed) ? false : { duration: 250 },
       interaction: { mode: 'index', intersect: false },
       plugins: {
@@ -680,7 +647,7 @@ export default function PriceChart({
           ? undefined
           : {
             value: latestClosePrice,
-            color: stats.change > 0 ? (isDark ? '#00f5a0' : '#10b981') : stats.change < 0 ? (isDark ? '#ff5c5c' : '#ef4444') : '#8b93a7',
+            color: stats.change > 0 ? '#00f5a0' : stats.change < 0 ? '#ff5c5c' : '#94a3b8',
             label: formatMoneyLocal(latestClosePrice, currencySymbol),
           },
         tooltip: {
@@ -753,7 +720,6 @@ export default function PriceChart({
       },
     };
   }, [
-    isDark,
     isMobile,
     isInteracting,
     isZoomed,

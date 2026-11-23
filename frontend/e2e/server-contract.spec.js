@@ -27,10 +27,14 @@ test('valid estimate, modal keyboard containment and supporting tab navigation',
   const dialog = page.getByRole('dialog', { name: 'Expanded price chart' });
   const close = dialog.getByRole('button', { name: 'Close expanded chart' });
   await expect(close).toBeFocused();
-  await page.keyboard.press('Tab');
-  await expect(close).toBeFocused();
+  // Expanded modal preserves chart toolbar controls and traps keyboard focus strictly inside dialog
+  await expect(dialog.getByRole('button', { name: 'MAX', exact: true })).toBeVisible();
+  for (let step = 0; step < 5; step += 1) {
+    await page.keyboard.press('Tab');
+    expect(await dialog.evaluate((el) => el.contains(document.activeElement))).toBe(true);
+  }
   await page.keyboard.press('Shift+Tab');
-  await expect(close).toBeFocused();
+  expect(await dialog.evaluate((el) => el.contains(document.activeElement))).toBe(true);
   expect(await page.getByLabel('Stock ticker').evaluate((element) => Boolean(element.closest('[inert]')))).toBe(true);
   await expect.poll(async () => {
     const canvas = await dialog.locator('canvas').boundingBox();
