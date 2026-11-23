@@ -24,11 +24,14 @@ ARTIFACT_VERSION = 1
 MAX_BYTES = 128 * 1024 * 1024
 
 
+_RUNTIME_IDENTITY: dict[str, str] = {
+    "python": platform.python_version(),
+    **{p: version(p) for p in ("numpy", "scikit-learn", "joblib")},
+}
+
+
 def runtime_identity() -> dict[str, str]:
-    return {
-        "python": platform.python_version(),
-        **{p: version(p) for p in ("numpy", "scikit-learn", "joblib")},
-    }
+    return dict(_RUNTIME_IDENTITY)
 
 
 def atomic_write(path: Path, content: bytes) -> None:

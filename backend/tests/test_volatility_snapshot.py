@@ -58,10 +58,16 @@ def test_volatility_snapshot_matches_frozen_deployable_contract(monkeypatch) -> 
         "rolling_c2c_20",
         "rolling_c2c_60",
         "rolling_c2c_multiscale",
-        "garch_11",
     }.issubset(snapshot.baseline_candidates)
-    assert snapshot.garch_variance_path is not None
-    assert snapshot.garch_variance_path.shape == (20,)
+    # GARCH(1,1) is deferred lazily to a snapshot_id-keyed cache on H=1 / garch_11 demand.
+    assert "garch_11" not in snapshot.baseline_candidates
+    assert snapshot.garch_variance_path is None
+    lazy_garch = volatility_snapshot.get_garch_variance_path(snapshot)
+    assert lazy_garch.shape == (20,)
+    assert np.all(lazy_garch > 0)
+    assert np.all(np.diff(lazy_garch) >= -1e-12)
+    assert isinstance(snapshot.raw_ohlcv, np.ndarray)
+    assert not snapshot.raw_ohlcv.flags.writeable
     assert len(snapshot.snapshot_id) == 64
 
 
@@ -156,9 +162,8 @@ def test_snapshot_cache_reuses_identical_inputs(monkeypatch) -> None:
     third = volatility_snapshot.build_volatility_inference_snapshot("MSFT")
 
     assert first is second is third
-    # causal_log_har_forecasts runs twice per build (horizons and path), so
-    # three builds would be six calls.
-    assert calls[0] == 2
+    # causal_log_har_forecasts runs once per build (20-step path covers horizons 1/5/10/20).
+    assert calls[0] == 1
 
 
 def test_snapshot_cache_rebuilds_when_observations_change(monkeypatch) -> None:
@@ -167,14 +172,14 @@ def test_snapshot_cache_rebuilds_when_observations_change(monkeypatch) -> None:
     calls = _counting_build(monkeypatch, frame)
 
     volatility_snapshot.build_volatility_inference_snapshot("MSFT")
-    assert calls[0] == 2
+    assert calls[0] == 1
 
     changed = _market_frame(521)
     monkeypatch.setattr(volatility_snapshot, "_download_ohlcv", lambda _ticker: changed.copy())
     volatility_snapshot.build_volatility_inference_snapshot("MSFT")
 
     # A different frame is a different cache key, so the build runs again.
-    assert calls[0] == 4
+    assert calls[0] == 2
 
 
 def test_snapshot_cache_distinguishes_provider_metadata(monkeypatch) -> None:
@@ -186,10 +191,10 @@ def test_snapshot_cache_distinguishes_provider_metadata(monkeypatch) -> None:
     calls = _counting_build(monkeypatch, frame)
 
     volatility_snapshot.build_volatility_inference_snapshot("MSFT")
-    assert calls[0] == 2
+    assert calls[0] == 1
 
     restamped = frame.copy()
     restamped.attrs["data_as_of"] = "2025-12-30"
     monkeypatch.setattr(volatility_snapshot, "_download_ohlcv", lambda _ticker: restamped.copy())
     volatility_snapshot.build_volatility_inference_snapshot("MSFT")
-    assert calls[0] == 4
+    assert calls[0] == 2

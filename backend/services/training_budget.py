@@ -23,7 +23,13 @@ def training_slot():
     capacity = settings.forecast_training_max_concurrency
     with _lock:
         budget = _budgets.setdefault(capacity, threading.BoundedSemaphore(capacity))
-    if not budget.acquire(blocking=False):
+    timeout = float(getattr(settings, "forecast_training_acquire_timeout_seconds", 1.5))
+    acquired_local = (
+        budget.acquire(blocking=True, timeout=timeout)
+        if timeout > 0
+        else budget.acquire(blocking=False)
+    )
+    if not acquired_local:
         raise TrainingBusyError("Forecast training is busy. Please retry shortly.")
     connection = None
     try:

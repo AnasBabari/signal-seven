@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -42,7 +43,31 @@ class AlpacaProvider:
         self.feed = feed
         self.adjustment = adjustment
         self.timeout_seconds = timeout_seconds
-        self._client = client
+        self._injected_client = client
+        self._client: httpx.Client | None = client
+        self._client_lock = threading.Lock()
+
+    def _get_client(self) -> httpx.Client:
+        if self._injected_client is not None:
+            return self._injected_client
+        with self._client_lock:
+            if self._client is None or self._client.is_closed:
+                self._client = httpx.Client(
+                    timeout=self.timeout_seconds,
+                    limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+                )
+            return self._client
+
+    def close(self) -> None:
+        """Close the provider-owned pooled HTTP client without closing injected test clients."""
+        if self._injected_client is not None:
+            return
+        with self._client_lock:
+            if self._client is not None:
+                try:
+                    self._client.close()
+                finally:
+                    self._client = None
 
     @property
     def configured(self) -> bool:
@@ -90,64 +115,55 @@ class AlpacaProvider:
         bars: list[dict[str, Any]] = []
         seen_tokens: set[str] = set()
         pages = 0
-        client = self._client or httpx.Client(timeout=self.timeout_seconds)
-        owns_client = self._client is None
-        try:
-            while True:
-                pages += 1
-                if pages > 10:
-                    raise MarketDataProviderError("Alpaca pagination exceeded the safety limit")
-                try:
-                    response = client.get(
-                        f"{self.base_url}/v2/stocks/{symbol}/bars",
-                        params=params,
-                        headers=headers,
-                    )
-                except httpx.TimeoutException as err:
-                    raise MarketDataTimeoutError("Alpaca market-data request timed out") from err
-                except httpx.HTTPError as err:
-                    raise MarketDataServiceError("Alpaca market-data transport failed") from err
-                if response.status_code == 429:
-                    raise MarketDataRateLimitError("Alpaca market-data rate limit exceeded")
-                if response.status_code in {
-                    400,
-                    404,
-                    422,
-                } and self._response_reports_unknown_symbol(response):
-                    raise MarketDataSymbolNotFound(f"Alpaca has no data for {symbol}")
-                if response.status_code in {401, 403}:
-                    raise MarketDataConfigurationError(
-                        "Alpaca market-data credentials were rejected"
-                    )
-                if response.status_code >= 500:
-                    raise MarketDataServiceError("Alpaca market-data service is unavailable")
-                if response.status_code >= 400:
-                    raise MarketDataServiceError(
-                        "Alpaca rejected the server-generated bars request"
-                    )
-                try:
-                    payload = response.json()
-                except ValueError as err:
-                    raise MarketDataProviderError("Alpaca returned malformed JSON") from err
-                page = payload.get("bars") if isinstance(payload, dict) else None
-                if isinstance(payload, dict) and "bars" in payload and page in (None, [], {}):
-                    break
-                if not isinstance(page, list):
-                    raise MarketDataProviderError("Alpaca returned a malformed bars payload")
-                bars.extend(item for item in page if isinstance(item, dict))
-                if len(bars) > 100_000:
-                    raise MarketDataProviderError("Alpaca bars payload exceeded the safety limit")
-                token = payload.get("next_page_token")
-                if not token:
-                    break
-                token_str = str(token)
-                if token_str in seen_tokens:
-                    raise MarketDataProviderError("Alpaca returned a repeated pagination token")
-                seen_tokens.add(token_str)
-                params["page_token"] = token_str
-        finally:
-            if owns_client:
-                client.close()
+        client = self._get_client()
+        while True:
+            pages += 1
+            if pages > 10:
+                raise MarketDataProviderError("Alpaca pagination exceeded the safety limit")
+            try:
+                response = client.get(
+                    f"{self.base_url}/v2/stocks/{symbol}/bars",
+                    params=params,
+                    headers=headers,
+                )
+            except httpx.TimeoutException as err:
+                raise MarketDataTimeoutError("Alpaca market-data request timed out") from err
+            except httpx.HTTPError as err:
+                raise MarketDataServiceError("Alpaca market-data transport failed") from err
+            if response.status_code == 429:
+                raise MarketDataRateLimitError("Alpaca market-data rate limit exceeded")
+            if response.status_code in {
+                400,
+                404,
+                422,
+            } and self._response_reports_unknown_symbol(response):
+                raise MarketDataSymbolNotFound(f"Alpaca has no data for {symbol}")
+            if response.status_code in {401, 403}:
+                raise MarketDataConfigurationError("Alpaca market-data credentials were rejected")
+            if response.status_code >= 500:
+                raise MarketDataServiceError("Alpaca market-data service is unavailable")
+            if response.status_code >= 400:
+                raise MarketDataServiceError("Alpaca rejected the server-generated bars request")
+            try:
+                payload = response.json()
+            except ValueError as err:
+                raise MarketDataProviderError("Alpaca returned malformed JSON") from err
+            page = payload.get("bars") if isinstance(payload, dict) else None
+            if isinstance(payload, dict) and "bars" in payload and page in (None, [], {}):
+                break
+            if not isinstance(page, list):
+                raise MarketDataProviderError("Alpaca returned a malformed bars payload")
+            bars.extend(item for item in page if isinstance(item, dict))
+            if len(bars) > 100_000:
+                raise MarketDataProviderError("Alpaca bars payload exceeded the safety limit")
+            token = payload.get("next_page_token")
+            if not token:
+                break
+            token_str = str(token)
+            if token_str in seen_tokens:
+                raise MarketDataProviderError("Alpaca returned a repeated pagination token")
+            seen_tokens.add(token_str)
+            params["page_token"] = token_str
         if not bars:
             raise MarketDataSymbolNotFound(f"Alpaca has no daily bars for {symbol}")
         try:

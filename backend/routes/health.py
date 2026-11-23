@@ -13,7 +13,7 @@ from config import APP_VERSION, settings
 from data_pipeline import market_circuit_breaker, market_data_service
 from services.forecast_ledger import LedgerUnavailableError, get_forecast_ledger
 from services.live_volatility import SUPPORTED_BASELINES
-from services.simple_forecast import FEATURE_VERSION, SUPPORTED_TICKERS
+from services.simple_forecast import FEATURE_VERSION, SUPPORTED_TICKERS, get_auto_candidate_names
 from services.volatility_contract import AUTO_MODEL_POLICY, VOLATILITY_MODEL_POLICY_VERSION
 from services.volatility_snapshot import VOLATILITY_HORIZONS
 
@@ -140,6 +140,7 @@ def models_discovery():
             "midpoint_evaluation": "unavailable",
             "current_refit_interval_coverage": "unavailable",
             "learned_candidates": ["ridge", "random_forest"],
+            "auto_candidates": list(get_auto_candidate_names()),
             "evaluation": "chronological_70_15_15_with_7_session_purge",
             "news_endpoint": "/api/v1/news",
             "news_role": "context_only",
@@ -147,6 +148,7 @@ def models_discovery():
         "volatility_forecasting": {
             "status": "available",
             "endpoint": "/api/v1/volatility/forecast",
+            "batch_endpoint": "/api/v1/volatility/forecast/batch",
             "public_forecast_mode": "read_only_preview",
             "live_collection_endpoint": "/api/v1/volatility/collect",
             "live_collection_authentication": "bearer_token_required",

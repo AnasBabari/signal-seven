@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 import yfinance as yf  # type: ignore[import-untyped]
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 
@@ -45,6 +46,26 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _shutdown_resources() -> None:
+    """Release pooled HTTP and database connections cleanly on shutdown."""
+    try:
+        import data_pipeline
+
+        close_md = getattr(data_pipeline.market_data_service, "close", None)
+        if callable(close_md):
+            close_md()
+    except Exception:
+        logger.warning("Failed to close market-data HTTP clients during shutdown", exc_info=True)
+    try:
+        from services import forecast_ledger
+
+        close_ledger = getattr(forecast_ledger, "close_forecast_ledger", None)
+        if callable(close_ledger):
+            close_ledger()
+    except Exception:
+        logger.warning("Failed to close forecast ledger pool during shutdown", exc_info=True)
+
+
 # ── Application Setup ────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -58,7 +79,10 @@ async def lifespan(_app: FastAPI):
     from services.forecast_warmup import start_forecast_warmup
 
     start_forecast_warmup()
-    yield
+    try:
+        yield
+    finally:
+        _shutdown_resources()
 
 
 app = FastAPI(
@@ -78,7 +102,9 @@ async def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
     )
 
 
-# ── CORS Middleware ──────────────────────────────────────────────────
+# ── Compression & CORS Middleware ────────────────────────────────────
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=4)
+
 _preview_cors_regex = settings.preview_cors_origin_regex or None
 
 app.add_middleware(
@@ -87,7 +113,8 @@ app.add_middleware(
     allow_origin_regex=_preview_cors_regex,
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "X-Prediction-Request-ID", "X-Client-Class"],
+    allow_headers=["Content-Type", "If-None-Match", "X-Prediction-Request-ID", "X-Client-Class"],
+    expose_headers=["ETag"],
 )
 
 

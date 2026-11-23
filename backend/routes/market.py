@@ -7,6 +7,7 @@ import logging
 import threading
 from typing import Any
 
+import pandas as pd
 import yfinance as default_yf  # type: ignore[import-untyped]
 from cachetools import TTLCache
 from fastapi import APIRouter, HTTPException, Query, Request, Response
@@ -54,6 +55,40 @@ def _fetch_history_intraday(symbol: str) -> list[dict[str, str | float]] | None:
     return None
 
 
+HISTORY_CACHE_CONTROL = "public, max-age=60, stale-while-revalidate=300"
+
+
+def _strip_weak_prefix(tag: str) -> str:
+    cleaned = tag.strip()
+    if cleaned.startswith("W/"):
+        return cleaned[2:].strip()
+    return cleaned
+
+
+def _etag_matches(if_none_match: str | None, etag: str) -> bool:
+    if not if_none_match:
+        return False
+    target = _strip_weak_prefix(etag)
+    for candidate in if_none_match.split(","):
+        cleaned = candidate.strip()
+        if cleaned == "*" or _strip_weak_prefix(cleaned) == target:
+            return True
+    return False
+
+
+def _serialize_daily_bars(frame: pd.DataFrame) -> list[dict[str, str | float]]:
+    """Vectorized daily bar serialization capped to the latest MAX_HISTORY_BARS."""
+    if frame.empty:
+        return []
+    tail = frame.iloc[-MAX_HISTORY_BARS:] if len(frame) > MAX_HISTORY_BARS else frame
+    if isinstance(tail.index, pd.DatetimeIndex):
+        dates = tail.index.strftime("%Y-%m-%d").tolist()
+    else:
+        dates = [pd.Timestamp(idx).date().isoformat() for idx in tail.index]
+    closes = tail["Close"].to_numpy(dtype=float).tolist()
+    return [{"d": day, "c": close} for day, close in zip(dates, closes, strict=True)]
+
+
 @router.get("/api/v1/history")
 @limiter.limit("30/minute")
 def history(
@@ -71,18 +106,23 @@ def history(
     symbol = validate_ticker(ticker)
     try:
         result = _fetch_history_daily(symbol)
-        frame = result.frame
-        daily = [
-            {"d": index.date().isoformat(), "c": float(row["Close"])}
-            for index, row in frame.iterrows()
-        ]
-        if len(daily) > MAX_HISTORY_BARS:
-            daily = daily[-MAX_HISTORY_BARS:]
+        grace_used = bool(getattr(result, "post_close_grace_used", False))
+        fingerprint = str(getattr(result, "data_fingerprint", "") or "")
+        etag = f'W/"{fingerprint}"' if (fingerprint and not grace_used) else None
+        if etag and _etag_matches(request.headers.get("if-none-match"), etag):
+            return Response(
+                status_code=304,
+                headers={"ETag": etag, "Cache-Control": HISTORY_CACHE_CONTROL},
+            )
+        daily = _serialize_daily_bars(result.frame)
         intraday = _fetch_history_intraday(symbol)
         currency, currency_symbol = resolve_quote_unit(symbol)
-        grace_used = bool(getattr(result, "post_close_grace_used", False))
         if grace_used:
             response.headers["Cache-Control"] = "no-store"
+        else:
+            response.headers["Cache-Control"] = HISTORY_CACHE_CONTROL
+            if etag:
+                response.headers["ETag"] = etag
         audit = getattr(result, "data_quality_audit", ())
         return {
             "ticker": symbol,
@@ -92,7 +132,7 @@ def history(
             "adjustment": result.adjustment,
             "currency": currency,
             "currency_symbol": currency_symbol,
-            "data_fingerprint": result.data_fingerprint,
+            "data_fingerprint": fingerprint,
             "raw_source_fingerprint": getattr(result, "raw_source_fingerprint", ""),
             "data_quality_audit": [
                 record.to_dict() if hasattr(record, "to_dict") else record for record in audit

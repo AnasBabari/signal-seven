@@ -247,7 +247,14 @@ def _load_session(horizon: int):
             metadata = _load_metadata(horizon)
             if hashlib.sha256(path.read_bytes()).hexdigest() != metadata["onnx_sha256"]:
                 raise G3UnavailableError("G3 artifact checksum mismatch")
-            session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+            sess_options = ort.SessionOptions()
+            sess_options.intra_op_num_threads = 1
+            sess_options.inter_op_num_threads = 1
+            session = ort.InferenceSession(
+                str(path),
+                sess_options=sess_options,
+                providers=["CPUExecutionProvider"],
+            )
             _sessions[horizon] = session
         return session
 
@@ -269,14 +276,25 @@ def _load_metadata(horizon: int) -> dict:
         raise G3UnavailableError("G3 metadata is missing or incompatible") from exc
 
 
-def g3_cumulative_variance(frame: pd.DataFrame, horizon: int) -> float:
-    """G3 cumulative variance forecast from the latest session (always positive)."""
-    if horizon not in G3_HORIZONS:
-        raise ValueError(f"G3 horizon must be one of {list(G3_HORIZONS)}")
+def extract_g3_latest_row(frame: pd.DataFrame) -> np.ndarray:
+    """Compute the frozen 22-column G3 feature vector once for the latest session."""
     features = build_g3_features(frame)
     row = features.iloc[[-1]].to_numpy(dtype=np.float32)
     if not np.isfinite(row).all():
         raise G3UnavailableError("latest session lacks complete G3 features")
+    return row
+
+
+def g3_cumulative_variance(
+    frame: pd.DataFrame,
+    horizon: int,
+    *,
+    precomputed_row: np.ndarray | None = None,
+) -> float:
+    """G3 cumulative variance forecast from the latest session (always positive)."""
+    if horizon not in G3_HORIZONS:
+        raise ValueError(f"G3 horizon must be one of {list(G3_HORIZONS)}")
+    row = precomputed_row if precomputed_row is not None else extract_g3_latest_row(frame)
     base = panel_rolling_base(frame, horizon)
     meta = _load_metadata(horizon)
     try:

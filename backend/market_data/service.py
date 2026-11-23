@@ -349,6 +349,17 @@ class MarketDataService:
             if isinstance(error, MarketDataServiceError):
                 self._last_success_session = None
 
+    def close(self) -> None:
+        """Close any pooled transport resources held by configured providers."""
+        seen: set[int] = set()
+        for provider in (*self.providers, *self.uk_providers):
+            if id(provider) in seen:
+                continue
+            seen.add(id(provider))
+            close_fn = getattr(provider, "close", None)
+            if callable(close_fn):
+                close_fn()
+
     def readiness(self) -> tuple[bool, dict[str, Any]]:
         required_session = latest_completed_trading_session().date().isoformat()
         us_names = {p.name for p in self.providers if p.configured}

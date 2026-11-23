@@ -13,6 +13,7 @@ from services.training_budget import TrainingBusyError, training_slot
 
 def test_different_tickers_share_capacity_but_memory_hits_still_work(monkeypatch):
     monkeypatch.setattr(settings, "forecast_training_max_concurrency", 1)
+    monkeypatch.setattr(settings, "forecast_training_acquire_timeout_seconds", 0.0)
     monkeypatch.setattr(settings, "forecast_training_coordination_database_url", None)
     monkeypatch.setattr(sf, "_load_fitted_forecast", lambda key, timings=None: None)
     frame = pd.DataFrame({"Close": [100.0]}, index=pd.to_datetime(["2026-10-01"]))

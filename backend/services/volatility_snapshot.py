@@ -152,51 +152,135 @@ def causal_log_har_forecasts(
     minimum_history: int = 60,
     refit_every: int = 5,
     ridge: float = 1e-4,
+    latest_only: bool = False,
 ) -> np.ndarray:
-    """Return causal cumulative variance forecasts for every origin."""
+    """Return causal cumulative variance forecasts matching exact ``refit_every`` cutoffs."""
     if not horizons or min(horizons) < 1:
         raise ValueError("horizons must contain positive integers")
     if refit_every < 1:
         raise ValueError("refit_every must be positive")
     rv = np.asarray(rv_daily, dtype=np.float64)
-    output = np.full((len(rv), len(horizons)), np.nan, dtype=np.float64)
-    coefficients: np.ndarray | None = None
-    last_refit = -refit_every
+    n = len(rv)
+    output = np.full((n, len(horizons)), np.nan, dtype=np.float64)
+    if n <= 22:
+        return output
+
     maximum_horizon = max(horizons)
     horizon_to_column = {horizon: column for column, horizon in enumerate(horizons)}
-    xtx = np.zeros((4, 4), dtype=np.float64)
-    xty = np.zeros(4, dtype=np.float64)
-    fitted_rows = 0
     penalty = np.eye(4, dtype=np.float64) * float(ridge)
     penalty[0, 0] = 0.0
 
-    for origin in range(22, len(rv)):
-        training_origin = origin - 1
-        if np.isfinite(rv[training_origin - 21 : training_origin + 2]).all():
-            design = _log_har_row(rv[training_origin - 21 : training_origin + 1])
-            response = float(np.log(max(rv[origin], 1e-12)))
-            xtx += np.outer(design, design)
-            xty += design * response
-            fitted_rows += 1
-        if origin < max(minimum_history, 22) or fitted_rows < 20:
-            continue
-        if not np.isfinite(rv[origin - 21 : origin + 1]).all():
-            continue
-        if coefficients is None or origin - last_refit >= refit_every:
-            coefficients = np.linalg.solve(xtx + penalty, xty)
-            last_refit = origin
+    is_fin = np.isfinite(rv)
+    fin_cs = np.empty(n + 1, dtype=np.int64)
+    fin_cs[0] = 0
+    np.cumsum(is_fin, out=fin_cs[1:])
 
-        history_tail = list(np.maximum(rv[origin - 21 : origin + 1], 1e-12))
+    # Origins run 22..n-1 (length n - 22).
+    # Training row at `origin` uses window [origin-22 .. origin] (len 23) and response rv[origin].
+    train_valid = (fin_cs[23 : n + 1] - fin_cs[0 : n - 22]) == 23
+    origin_valid = (fin_cs[23 : n + 1] - fin_cs[1 : n - 21]) == 22
+    fitted_rows = np.cumsum(train_valid.astype(np.int64))
+
+    origins_all = np.arange(22, n, dtype=np.int64)
+    min_origin = max(minimum_history, 22)
+    eligible_mask = (origins_all >= min_origin) & (fitted_rows >= 20) & origin_valid
+    eligible_origins = origins_all[eligible_mask]
+    if eligible_origins.size == 0:
+        return output
+
+    if latest_only and eligible_origins[-1] != n - 1:
+        return output
+
+    refit_origins_list: list[int] = []
+    origin_refit_indices = np.empty(eligible_origins.size, dtype=np.int64)
+    last_refit = -refit_every
+    refit_idx = -1
+    for i, orig in enumerate(eligible_origins.tolist()):
+        if refit_idx < 0 or orig - last_refit >= refit_every:
+            refit_origins_list.append(orig)
+            last_refit = orig
+            refit_idx += 1
+        origin_refit_indices[i] = refit_idx
+
+    # Replace non-finite values with 1.0 before vectorized log/mean; invalid rows are masked out.
+    safe_clean = np.where(is_fin, np.maximum(np.where(is_fin, rv, 1.0), 1e-12), 1.0)
+    w5 = np.lib.stride_tricks.sliding_window_view(safe_clean, 5)
+    w22 = np.lib.stride_tricks.sliding_window_view(safe_clean, 22)
+
+    if latest_only:
+        target_refit = refit_origins_list[-1]
+        cutoff = target_refit - 22 + 1
+        valid_rows = train_valid[:cutoff]
+        d1 = np.log(safe_clean[21 : 21 + cutoff][valid_rows])
+        d2 = np.log(w5[17 : 17 + cutoff][valid_rows].mean(axis=1))
+        d3 = np.log(w22[0:cutoff][valid_rows].mean(axis=1))
+        x_fit = np.column_stack((np.ones(d1.size, dtype=np.float64), d1, d2, d3))
+        y_fit = np.log(safe_clean[22 : 22 + cutoff][valid_rows])
+        coefficients = np.linalg.solve(x_fit.T @ x_fit + penalty, x_fit.T @ y_fit)
+
+        buf = np.empty(22 + maximum_horizon, dtype=np.float64)
+        buf[:22] = safe_clean[n - 22 : n]
         cumulative = 0.0
+        c0, c1, c2, c3 = (
+            float(coefficients[0]),
+            float(coefficients[1]),
+            float(coefficients[2]),
+            float(coefficients[3]),
+        )
         for step in range(1, maximum_horizon + 1):
-            row = _log_har_row(np.asarray(history_tail, dtype=np.float64))
-            next_variance = float(np.exp(np.clip(row @ coefficients, -30.0, 5.0)))
-            next_variance = max(next_variance, 1e-12)
-            history_tail.append(next_variance)
-            del history_tail[0]
+            end = 21 + step
+            log_pred = (
+                c0
+                + c1 * float(np.log(buf[end - 1]))
+                + c2 * float(np.log(np.mean(buf[end - 5 : end])))
+                + c3 * float(np.log(np.mean(buf[end - 22 : end])))
+            )
+            next_variance = max(float(np.exp(np.clip(log_pred, -30.0, 5.0))), 1e-12)
+            buf[end] = next_variance
             cumulative += next_variance
             if step in horizon_to_column:
-                output[origin, horizon_to_column[step]] = cumulative
+                output[n - 1, horizon_to_column[step]] = cumulative
+        return output
+
+    m_train = n - 22
+    x_all = np.empty((m_train, 4), dtype=np.float64)
+    x_all[:, 0] = 1.0
+    x_all[:, 1] = np.log(safe_clean[21 : n - 1])
+    x_all[:, 2] = np.log(w5[17 : n - 5].mean(axis=1))
+    x_all[:, 3] = np.log(w22[0 : n - 22].mean(axis=1))
+    y_all = np.log(safe_clean[22:n])
+
+    x_masked = np.where(train_valid[:, None], x_all, 0.0)
+    y_masked = np.where(train_valid, y_all, 0.0)
+
+    xtx_cum = np.cumsum(x_masked[:, :, None] * x_masked[:, None, :], axis=0)
+    xty_cum = np.cumsum(x_masked * y_masked[:, None], axis=0)
+
+    refit_pos = np.asarray(refit_origins_list, dtype=np.int64) - 22
+    all_coefs = np.linalg.solve(xtx_cum[refit_pos] + penalty, xty_cum[refit_pos, :, None])[..., 0]
+    origin_coefs = all_coefs[origin_refit_indices]
+
+    m_eligible = eligible_origins.size
+    buf = np.empty((m_eligible, 22 + maximum_horizon), dtype=np.float64)
+    buf[:, :22] = w22[eligible_origins - 21]
+    cumulative_vec = np.zeros(m_eligible, dtype=np.float64)
+    c0_v = origin_coefs[:, 0]
+    c1_v = origin_coefs[:, 1]
+    c2_v = origin_coefs[:, 2]
+    c3_v = origin_coefs[:, 3]
+    for step in range(1, maximum_horizon + 1):
+        end = 21 + step
+        log_pred = (
+            c0_v
+            + c1_v * np.log(buf[:, end - 1])
+            + c2_v * np.log(np.mean(buf[:, end - 5 : end], axis=1))
+            + c3_v * np.log(np.mean(buf[:, end - 22 : end], axis=1))
+        )
+        next_var = np.maximum(np.exp(np.clip(log_pred, -30.0, 5.0)), 1e-12)
+        buf[:, end] = next_var
+        cumulative_vec += next_var
+        if step in horizon_to_column:
+            output[eligible_origins, horizon_to_column[step]] = cumulative_vec
     return output
 
 
@@ -299,7 +383,7 @@ class VolatilityInferenceSnapshot:
     garch_variance_path: np.ndarray | None = None
     data_as_of: str | None = None
     raw_dates: tuple[str, ...] = ()
-    raw_ohlcv: tuple[tuple[float, ...], ...] = ()
+    raw_ohlcv: np.ndarray | tuple[tuple[float, ...], ...] = ()
     data_fingerprint: str = ""
     data_feed: str = "unknown"
     price_adjustment: str = "unknown"
@@ -393,6 +477,8 @@ def _snapshot_identity(
     hasher.update(np.asarray(baseline, dtype=np.float64).tobytes())
     if baseline_paths:
         for name in sorted(baseline_paths):
+            if name == "garch_11":
+                continue
             hasher.update(name.encode("ascii"))
             hasher.update(np.asarray(baseline_paths[name], dtype=np.float64).tobytes())
     return hasher.hexdigest()
@@ -464,6 +550,9 @@ def _baseline_variance_paths(
 _SNAPSHOT_CACHE_MAX = 64
 _snapshot_cache: OrderedDict[str, VolatilityInferenceSnapshot] = OrderedDict()
 _snapshot_cache_lock = threading.Lock()
+_GARCH_CACHE_MAX = 64
+_garch_cache: OrderedDict[str, np.ndarray] = OrderedDict()
+_garch_cache_lock = threading.Lock()
 # Striped build locks: two requests for the same inputs share one build; two
 # requests for different inputs still proceed in parallel.
 _SNAPSHOT_BUILD_LOCKS = tuple(threading.Lock() for _ in range(32))
@@ -477,16 +566,66 @@ def _snapshot_build_lock(key: str) -> threading.Lock:
 def _frame_fingerprint(symbol: str, raw: pd.DataFrame) -> str:
     """Content identity of the observations a snapshot is derived from."""
     digest = hashlib.sha256(symbol.encode("utf-8"))
-    digest.update(pd.util.hash_pandas_object(raw, index=True).values.tobytes())
+    data_fp = str(raw.attrs.get("data_fingerprint") or "")
+    if data_fp:
+        digest.update(data_fp.encode("utf-8"))
+    else:
+        digest.update(pd.util.hash_pandas_object(raw, index=True).values.tobytes())
     for attribute in ("data_as_of", "data_provider", "data_feed", "price_adjustment"):
         digest.update(str(raw.attrs.get(attribute, "")).encode("utf-8"))
     return digest.hexdigest()
 
 
 def clear_snapshot_cache() -> None:
-    """Drop cached snapshots. Used by tests and after a data refresh."""
+    """Drop cached snapshots and lazy GARCH paths. Used by tests and after a data refresh."""
     with _snapshot_cache_lock:
         _snapshot_cache.clear()
+    with _garch_cache_lock:
+        _garch_cache.clear()
+
+
+def get_garch_variance_path(snapshot: VolatilityInferenceSnapshot) -> np.ndarray:
+    """Compute or retrieve the cached causal GARCH(1,1) cumulative variance path.
+
+    GARCH(1,1) is only needed for 1-day auto forecasts and explicit ``garch_11``
+    requests. Deferring L-BFGS-B optimization off the snapshot build path avoids
+    unnecessary CPU work for the standard 5/10/20-day requests while preserving
+    exact MLE parity and snapshot-scoped caching when GARCH is requested.
+    """
+    existing = getattr(snapshot, "garch_variance_path", None)
+    if existing is not None:
+        return np.asarray(existing, dtype=np.float64)
+
+    cache_key = str(getattr(snapshot, "snapshot_id", "") or "")
+    if cache_key:
+        with _garch_cache_lock:
+            cached = _garch_cache.get(cache_key)
+            if cached is not None:
+                _garch_cache.move_to_end(cache_key)
+                return cached
+
+    raw_ohlcv = getattr(snapshot, "raw_ohlcv", None)
+    close: np.ndarray
+    if isinstance(raw_ohlcv, np.ndarray) and raw_ohlcv.ndim == 2 and raw_ohlcv.shape[1] >= 4:
+        close = np.asarray(raw_ohlcv[:, 3], dtype=np.float64)
+    elif raw_ohlcv is not None and len(raw_ohlcv) > 0:
+        arr = np.asarray(raw_ohlcv, dtype=np.float64)
+        if arr.ndim != 2 or arr.shape[1] < 4:
+            raise ValueError("Snapshot raw_ohlcv has an invalid shape for GARCH(1,1)")
+        close = arr[:, 3]
+    else:
+        close = np.asarray(getattr(snapshot, "historical_prices", ()), dtype=np.float64)
+
+    path = _garch11_cumulative_variance_path(close, VOLATILITY_MAX_HORIZON)
+    path.setflags(write=False)
+
+    if cache_key:
+        with _garch_cache_lock:
+            _garch_cache[cache_key] = path
+            _garch_cache.move_to_end(cache_key)
+            while len(_garch_cache) > _GARCH_CACHE_MAX:
+                _garch_cache.popitem(last=False)
+    return path
 
 
 def _cached_snapshot(key: str) -> VolatilityInferenceSnapshot | None:
@@ -545,18 +684,19 @@ def _build_volatility_inference_snapshot(
     market_data_cache = str(raw.attrs.get("market_data_cache", "unknown"))
     features = build_features_v5(raw)
     proxy = realized_variance_proxies(raw)["RV_C2C"].clip(lower=1e-12)
-    har = causal_log_har_forecasts(proxy, VOLATILITY_HORIZONS)
-    har_path = causal_log_har_forecasts(proxy, VOLATILITY_PATH_HORIZONS)[-1]
-    garch_path = _garch11_cumulative_variance_path(
-        raw["Close"].to_numpy(dtype=np.float64), VOLATILITY_MAX_HORIZON
-    )
+    if "latest_only" in inspect.signature(causal_log_har_forecasts).parameters:
+        har_path = causal_log_har_forecasts(proxy, VOLATILITY_PATH_HORIZONS, latest_only=True)[-1]
+    else:
+        har_path = causal_log_har_forecasts(proxy, VOLATILITY_PATH_HORIZONS)[-1]
     feature_matrix = features[list(DEPLOYABLE_FEATURE_COLUMNS_V5)].to_numpy(dtype=np.float64)
     last = len(raw) - 1
     if last < VOLATILITY_WINDOW_SIZE - 1:
         raise ValueError("market history is too short for volatility inference")
     window = feature_matrix[last - VOLATILITY_WINDOW_SIZE + 1 : last + 1]
-    baseline = har[last]
-    baseline_paths = _baseline_variance_paths(features.iloc[last], har_path, garch_path)
+    baseline = np.asarray(har_path, dtype=np.float64)[
+        np.asarray(VOLATILITY_HORIZONS, dtype=np.intp) - 1
+    ]
+    baseline_paths = _baseline_variance_paths(features.iloc[last], har_path, garch_path=None)
     if "causal_log_har" not in baseline_paths:
         raise ValueError("latest market history cannot form a finite HAR variance path")
     if not np.isfinite(window).all() or not np.isfinite(baseline).all() or (baseline <= 0).any():
@@ -571,6 +711,10 @@ def _build_volatility_inference_snapshot(
     data_as_of = str(
         raw.attrs.get("data_as_of") or pd.Timestamp(raw.index[last]).date().isoformat()
     )
+    raw_ohlcv = np.ascontiguousarray(
+        raw[["Open", "High", "Low", "Close", "Volume"]].to_numpy(dtype=np.float64)
+    )
+    raw_ohlcv.setflags(write=False)
     return VolatilityInferenceSnapshot(
         ticker=symbol,
         snapshot_id=_snapshot_identity(
@@ -589,18 +733,15 @@ def _build_volatility_inference_snapshot(
         feature_names=DEPLOYABLE_FEATURE_COLUMNS_V5,
         features=window.astype(np.float32),
         causal_har_variance=baseline.astype(np.float32),
-        baseline_candidates=_baseline_candidates(features.iloc[last], baseline, garch_path),
+        baseline_candidates=_baseline_candidates(features.iloc[last], baseline, garch_path=None),
         baseline_variance_paths=baseline_paths,
-        garch_variance_path=garch_path.astype(np.float32),
+        garch_variance_path=None,
         historical_dates=tuple(pd.Timestamp(value).date().isoformat() for value in history.index),
         historical_prices=history["Close"].to_numpy(dtype=np.float64),
         future_dates=tuple(future_dates),
         data_as_of=data_as_of,
         raw_dates=tuple(value.date().isoformat() for value in raw.index),
-        raw_ohlcv=tuple(
-            tuple(float(v) for v in row)
-            for row in raw[["Open", "High", "Low", "Close", "Volume"]].to_numpy()
-        ),
+        raw_ohlcv=raw_ohlcv,
         data_fingerprint=str(raw.attrs.get("data_fingerprint", "")),
         data_feed=str(raw.attrs.get("data_feed", "unknown")),
         price_adjustment=str(raw.attrs.get("price_adjustment", "unknown")),

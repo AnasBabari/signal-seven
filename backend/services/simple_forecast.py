@@ -307,11 +307,16 @@ def get_ticker_meta(symbol: str) -> dict[str, str]:
     }
 
 
-_cache: TTLCache = TTLCache(maxsize=max(len(SUPPORTED_TICKERS) * 4, 32), ttl=6 * 60 * 60)
+_cache: TTLCache = TTLCache(maxsize=128, ttl=6 * 60 * 60)
 _cache_lock = threading.RLock()
 _training_locks = [threading.RLock() for _ in range(32)]
 MODEL_CACHE_VERSION = "learned-artifact-v3"
 _gpu_signature = None
+
+_IMPLEMENTATION_HASH: str = hashlib.sha256(
+    Path(__file__).read_bytes() + Path(forecast_artifacts.__file__).read_bytes()
+).hexdigest()
+_RUNTIME_IDENTITY_JSON: str = json.dumps(forecast_artifacts.runtime_identity(), sort_keys=True)
 
 
 def _checkpoint_signature() -> str:
@@ -328,19 +333,17 @@ def _checkpoint_signature() -> str:
 
 
 def _forecast_cache_key(symbol: str, frame: pd.DataFrame, model: str) -> str:
-    data_hash = hashlib.sha256(
-        pd.util.hash_pandas_object(frame, index=True).values.tobytes()
-    ).hexdigest()
-    configs = {
-        name: repr(candidate.get_params(deep=True))
-        for name, candidate in _candidate_models().items()
-    }
-    config_hash = hashlib.sha256(json.dumps(configs, sort_keys=True).encode()).hexdigest()
-    implementation_hash = hashlib.sha256(
-        Path(__file__).read_bytes() + Path(forecast_artifacts.__file__).read_bytes()
-    ).hexdigest()
-    runtime = json.dumps(forecast_artifacts.runtime_identity(), sort_keys=True)
-    return f"{symbol}:{frame.index[-1]}:{model}:{FEATURE_VERSION}:{MODEL_CACHE_VERSION}:{data_hash}:{config_hash}:{_checkpoint_signature()}:{implementation_hash}:{runtime}"
+    data_hash = str(frame.attrs.get("data_fingerprint") or "")
+    if not data_hash:
+        data_hash = hashlib.sha256(
+            pd.util.hash_pandas_object(frame, index=True).values.tobytes()
+        ).hexdigest()
+    candidate_scope = ",".join(get_auto_candidate_names()) if model == "auto" else model
+    return (
+        f"{symbol}:{frame.index[-1]}:{model}:{candidate_scope}:{FEATURE_VERSION}:"
+        f"{MODEL_CACHE_VERSION}:{data_hash}:{_CONFIG_HASH}:{_checkpoint_signature()}:"
+        f"{_IMPLEMENTATION_HASH}:{_RUNTIME_IDENTITY_JSON}"
+    )
 
 
 def _infer_artifact(payload: dict[str, Any]) -> dict[str, Any]:
@@ -531,6 +534,29 @@ def _candidate_models() -> dict[str, Any]:
     }
 
 
+_SUPPORTED_SKLEARN_CANDIDATES: tuple[str, ...] = tuple(_candidate_models().keys())
+_CONFIG_HASH: str = hashlib.sha256(
+    json.dumps(
+        {
+            name: repr(candidate.get_params(deep=True))
+            for name, candidate in _candidate_models().items()
+        },
+        sort_keys=True,
+    ).encode("utf-8")
+).hexdigest()
+
+
+def get_auto_candidate_names() -> tuple[str, ...]:
+    """Return the configured ordered candidate subset evaluated for ``model=auto``."""
+    raw = getattr(settings, "forecast_auto_candidates", "ridge")
+    if isinstance(raw, str):
+        items = [item.strip().lower() for item in raw.split(",") if item.strip()]
+    else:
+        items = [str(item).strip().lower() for item in raw if str(item).strip()]
+    valid = tuple(dict.fromkeys(name for name in items if name in _SUPPORTED_SKLEARN_CANDIDATES))
+    return valid or ("ridge",)
+
+
 def _return_errors(actual: np.ndarray, predicted: np.ndarray) -> np.ndarray:
     return np.exp(np.asarray(predicted)) - np.exp(np.asarray(actual))
 
@@ -694,7 +720,8 @@ def _train_and_forecast_locked(
     normalized_model = model_name.strip().lower()
     if normalized_model not in {"auto", "ridge", "random_forest", "gpu_lstm", "lstm"}:
         raise ValueError("Unsupported explicit price model request.")
-    frame = frame.loc[~frame.index.duplicated(keep="last")].sort_index()
+    if not frame.index.is_monotonic_increasing or frame.index.has_duplicates:
+        frame = frame.loc[~frame.index.duplicated(keep="last")].sort_index()
     data_as_of = pd.Timestamp(frame.index[-1]).date().isoformat()
     cache_key = _forecast_cache_key(symbol, frame, normalized_model)
     started = time.perf_counter()
@@ -796,7 +823,11 @@ def _fit_forecast(symbol, frame, normalized_model, data_as_of, cache_key, starte
             model_load_ms=model_load_ms,
         )
 
-    candidates = _candidate_models()
+    all_candidates = _candidate_models()
+    if normalized_model not in {"auto", *all_candidates}:
+        raise ValueError("Unsupported explicit price model request.")
+    active_names = get_auto_candidate_names() if normalized_model == "auto" else (normalized_model,)
+    candidates = {name: all_candidates[name] for name in active_names}
     validation_scores: dict[str, float] = {}
     validation_predictions: dict[str, np.ndarray] = {}
     for name, model in candidates.items():
@@ -807,8 +838,6 @@ def _fit_forecast(symbol, frame, normalized_model, data_as_of, cache_key, starte
         validation_predictions[name] = predicted
         validation_scores[name] = float(mean_absolute_error(targets[validation_mask], predicted))
 
-    if normalized_model not in {"auto", *candidates}:
-        raise ValueError("Unsupported explicit price model request.")
     selected_name = (
         normalized_model
         if normalized_model in candidates

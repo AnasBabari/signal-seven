@@ -7,6 +7,7 @@ model files are written and no certification or release gate is involved.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -19,7 +20,7 @@ from services.volatility_contract import (
     VOLATILITY_MODEL_VERSION,
     validate_volatility_horizon,
 )
-from services.volatility_snapshot import VolatilityInferenceSnapshot
+from services.volatility_snapshot import VolatilityInferenceSnapshot, get_garch_variance_path
 
 SUPPORTED_BASELINES = (
     "auto",
@@ -66,10 +67,14 @@ def _variance_for(snapshot: VolatilityInferenceSnapshot, model: str, horizon: in
         "garch_11": "garch_11",
     }
     candidate = snapshot.baseline_candidates.get(mapping[name])
-    if candidate is None:
+    if candidate is None and name == "garch_11":
+        path = get_garch_variance_path(snapshot)
+        variance = float(path[horizon - 1])
+    elif candidate is None:
         raise ValueError(f"baseline candidate {mapping[name]!r} is unavailable")
-    index = _HORIZONS.index(horizon)
-    variance = float(np.asarray(candidate, dtype=np.float64)[index])
+    else:
+        index = _HORIZONS.index(horizon)
+        variance = float(np.asarray(candidate, dtype=np.float64)[index])
     if not np.isfinite(variance) or variance <= 0:
         raise ValueError("baseline produced a non-positive variance")
     return variance
@@ -115,6 +120,8 @@ def _variance_path_for(
     key = mapping[name]
     paths = getattr(snapshot, "baseline_variance_paths", None) or {}
     path = paths.get(key)
+    if path is None and name == "garch_11" and snapshot.baseline_candidates.get("garch_11") is None:
+        path = get_garch_variance_path(snapshot)
     if path is not None:
         values = np.asarray(path, dtype=np.float64).reshape(-1)
         prefix = values[:horizon]
@@ -174,8 +181,54 @@ def _snapshot_risk_context(snapshot, daily_variance):
     return _trailing_risk_context(frame, daily_variance)
 
 
+@dataclass(frozen=True)
+class G3BatchContext:
+    """Reusable single-pass OHLCV frame and latest G3 feature row for multi-horizon batches."""
+
+    frame: Any | None
+    row: np.ndarray | None
+    unavailable_reason: str | None = None
+
+
+def _snapshot_ohlcv_frame(snapshot: VolatilityInferenceSnapshot) -> Any:
+    import pandas as pd
+
+    from services import g3_volatility as g3
+
+    raw_ohlcv = getattr(snapshot, "raw_ohlcv", None)
+    if raw_ohlcv is None or len(raw_ohlcv) == 0:
+        raise g3.G3UnavailableError("Snapshot does not contain immutable market observations")
+    frame = pd.DataFrame(
+        raw_ohlcv,
+        index=pd.to_datetime(snapshot.raw_dates),
+        columns=["Open", "High", "Low", "Close", "Volume"],
+    )
+    if (
+        frame.index[-1].date().isoformat() != snapshot.origin_date
+        or float(frame["Close"].iloc[-1]) != snapshot.origin_close
+    ):
+        raise ValueError("Snapshot market origin mismatch")
+    return frame
+
+
+def prepare_g3_batch_context(snapshot: VolatilityInferenceSnapshot) -> G3BatchContext:
+    """Compute the OHLCV frame and G3 feature vector once across all requested horizons."""
+    from services import g3_volatility as g3
+
+    try:
+        frame = _snapshot_ohlcv_frame(snapshot)
+        row = g3.extract_g3_latest_row(frame)
+        return G3BatchContext(frame=frame, row=row, unavailable_reason=None)
+    except g3.G3UnavailableError as err:
+        return G3BatchContext(frame=None, row=None, unavailable_reason=str(err) or "G3 unavailable")
+
+
 def _build_g3_forecast(
-    snapshot: VolatilityInferenceSnapshot, horizon: int, requested_model: str
+    snapshot: VolatilityInferenceSnapshot,
+    horizon: int,
+    requested_model: str,
+    *,
+    g3_context: G3BatchContext | None = None,
 ) -> dict[str, Any]:
     """Serve the promoted G3 GPU correction with automatic rolling fallback.
 
@@ -186,22 +239,16 @@ def _build_g3_forecast(
     from services import g3_volatility as g3
 
     fallback_reason: str | None = None
+    frame = None
     try:
-        import pandas as pd
-
-        if not getattr(snapshot, "raw_ohlcv", ()):
-            raise g3.G3UnavailableError("Snapshot does not contain immutable market observations")
-        frame = pd.DataFrame(
-            snapshot.raw_ohlcv,
-            index=pd.to_datetime(snapshot.raw_dates),
-            columns=["Open", "High", "Low", "Close", "Volume"],
-        )
-        if (
-            frame.index[-1].date().isoformat() != snapshot.origin_date
-            or float(frame["Close"].iloc[-1]) != snapshot.origin_close
-        ):
-            raise ValueError("Snapshot market origin mismatch")
-        variance = g3.g3_cumulative_variance(frame, horizon)
+        if g3_context is not None:
+            if g3_context.unavailable_reason is not None or g3_context.frame is None:
+                raise g3.G3UnavailableError(g3_context.unavailable_reason or "G3 unavailable")
+            frame = g3_context.frame
+            variance = g3.g3_cumulative_variance(frame, horizon, precomputed_row=g3_context.row)
+        else:
+            frame = _snapshot_ohlcv_frame(snapshot)
+            variance = g3.g3_cumulative_variance(frame, horizon)
         model_name = GPU_G3_MODEL
         variance_path = None
     except g3.G3UnavailableError as err:
@@ -298,12 +345,15 @@ def build_live_volatility_forecast(
     *,
     horizon: int,
     model: str = "auto",
+    g3_context: G3BatchContext | None = None,
 ) -> dict[str, Any]:
     """Return a transparent volatility cone and its matched baseline metadata."""
     normalized_horizon = validate_volatility_horizon(horizon)
     requested_model = str(model).strip().lower()
     if requested_model == GPU_G3_MODEL:
-        return _build_g3_forecast(snapshot, normalized_horizon, requested_model)
+        return _build_g3_forecast(
+            snapshot, normalized_horizon, requested_model, g3_context=g3_context
+        )
     model_name = _candidate_name(requested_model, normalized_horizon)
     variance = _variance_for(snapshot, model_name, normalized_horizon)
     variance_path = _variance_path_for(snapshot, model_name, normalized_horizon)
@@ -377,4 +427,10 @@ def build_live_volatility_forecast(
     }
 
 
-__all__ = ["SUPPORTED_BASELINES", "build_live_volatility_forecast"]
+__all__ = [
+    "G3BatchContext",
+    "GPU_G3_MODEL",
+    "SUPPORTED_BASELINES",
+    "build_live_volatility_forecast",
+    "prepare_g3_batch_context",
+]

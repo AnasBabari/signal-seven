@@ -124,6 +124,11 @@ class Settings(BaseSettings):
     forecast_model_cache_dir: str | None = None
     # Process-wide fitting capacity. Cache hits do not consume a training slot.
     forecast_training_max_concurrency: int = Field(default=1, ge=1, le=4)
+    forecast_training_acquire_timeout_seconds: float = Field(default=1.5, ge=0.0, le=30.0)
+    # Comma-separated learned candidates evaluated for `model=auto`. Defaulting to
+    # closed-form Ridge keeps serving deterministic (~15-40ms) without ephemeral disk
+    # artifacts; `model=random_forest` remains explicitly opt-in.
+    forecast_auto_candidates: str = "ridge"
     # Explicit opt-in; PostgreSQL advisory locks serialize fitting across workers.
     # Local/ephemeral disk caches do not coordinate independent workers.
     forecast_training_coordination_database_url: str | None = None
@@ -132,7 +137,7 @@ class Settings(BaseSettings):
     # last data date, so that cost returns every trading day. Set
     # forecast_warmup_max_tickers=0 to disable.
     forecast_warmup_enabled: bool = True
-    forecast_warmup_max_tickers: int = Field(default=8, ge=0, le=64)
+    forecast_warmup_max_tickers: int = Field(default=2, ge=0, le=64)
     forecast_warmup_tickers: list[str] = Field(default_factory=list)
     # Also pre-build the volatility snapshot. The serving UI requests horizons
     # 5/10/20 for one ticker and they share a single snapshot costing ~2-4s,

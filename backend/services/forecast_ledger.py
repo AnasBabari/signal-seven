@@ -6,6 +6,8 @@ market volatility once future trading sessions resolve.
 
 from __future__ import annotations
 
+import contextlib
+import functools
 import hashlib
 import json
 import logging
@@ -14,6 +16,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import threading
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -58,9 +61,10 @@ class _LedgerConnection:
     backends on one tested code path and avoiding string interpolation of data.
     """
 
-    def __init__(self, raw: Any, backend: str) -> None:
+    def __init__(self, raw: Any, backend: str, *, pool_cm: Any = None) -> None:
         self.raw = raw
         self.backend = backend
+        self._pool_cm = pool_cm
 
     def _translate(self, query: str) -> str:
         return query.replace("?", "%s") if self.backend == "postgres" else query
@@ -78,12 +82,22 @@ class _LedgerConnection:
         self.raw.rollback()
 
     def close(self) -> None:
+        if self._pool_cm is not None:
+            cm = self._pool_cm
+            self._pool_cm = None
+            cm.__exit__(None, None, None)
+            return
         self.raw.close()
 
     def __enter__(self) -> _LedgerConnection:
         return self
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
+        if self._pool_cm is not None:
+            cm = self._pool_cm
+            self._pool_cm = None
+            cm.__exit__(exc_type, exc_value, traceback)
+            return
         try:
             if exc_type is not None:
                 self.rollback()
@@ -121,9 +135,76 @@ _POSTGRES_REQUIRED_COLUMNS = frozenset(
 )
 
 
+_TRACK_RECORD_AGG_SELECT_COMMON = """
+            SELECT
+                COUNT(*) AS total_forecasts,
+                COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0) AS pending_forecasts,
+                COALESCE(SUM(CASE WHEN status = 'scored' THEN 1 ELSE 0 END), 0) AS scored_forecasts,
+                AVG(CASE WHEN status = 'scored' THEN abs_error END) AS mean_mae,
+                AVG(
+                    CASE
+                        WHEN status = 'scored' AND forecast_error IS NOT NULL
+                        THEN forecast_error * forecast_error
+                    END
+                ) AS mean_sq_error,
+                AVG(CASE WHEN status = 'scored' THEN qlike_loss END) AS mean_qlike,
+                COALESCE(
+                    SUM(CASE WHEN status = 'scored' AND qlike_loss IS NOT NULL THEN 1 ELSE 0 END),
+                    0
+                ) AS qlike_count,
+                COALESCE(
+                    SUM(
+                        CASE
+                            WHEN status = 'scored'
+                             AND actual_realized_volatility IS NOT NULL
+                             AND LENGTH(model_version) >= 20
+                             AND SUBSTR(model_version, LENGTH(model_version) - 19, 20) = ':annualized_sigma_v1'
+                            THEN 1 ELSE 0
+                        END
+                    ),
+                    0
+                ) AS direction_eligible_forecasts,
+                COALESCE(
+                    SUM(
+                        CASE
+                            WHEN status = 'scored'
+                             AND actual_realized_volatility IS NOT NULL
+                             AND LENGTH(model_version) >= 20
+                             AND SUBSTR(model_version, LENGTH(model_version) - 19, 20) = ':annualized_sigma_v1'
+                             AND (
+                                 ((predicted_volatility - recent_realized_volatility) >= 0
+                                  AND (actual_realized_volatility - recent_realized_volatility) >= 0)
+                                 OR
+                                 ((predicted_volatility - recent_realized_volatility) < 0
+                                  AND (actual_realized_volatility - recent_realized_volatility) < 0)
+                             )
+                            THEN 1 ELSE 0
+                        END
+                    ),
+                    0
+                ) AS direction_hits"""
+
+_SQLITE_TRACK_RECORD_AGG_SQL = (
+    _TRACK_RECORD_AGG_SELECT_COMMON
+    + "\n            FROM forecast_ledger\n            WHERE record_source=?"
+)
+
+_POSTGRES_TRACK_RECORD_AGG_SQL = (
+    _TRACK_RECORD_AGG_SELECT_COMMON
+    + ",\n                PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY qlike_loss) "
+    "FILTER (WHERE status = 'scored' AND qlike_loss IS NOT NULL) AS median_qlike"
+    "\n            FROM forecast_ledger\n            WHERE record_source=?"
+)
+
+
+@functools.lru_cache(maxsize=1)
 def get_current_code_commit() -> str:
     """Resolve the current git commit SHA or explicit environment variable; fallback to 'dev-local'."""
-    env_commit = os.environ.get("APP_COMMIT_SHA") or os.environ.get("GIT_COMMIT")
+    env_commit = (
+        os.environ.get("RENDER_GIT_COMMIT")
+        or os.environ.get("APP_COMMIT_SHA")
+        or os.environ.get("GIT_COMMIT")
+    )
     if env_commit:
         return str(env_commit).strip()
     try:
@@ -253,6 +334,8 @@ class ForecastLedger:
                 )
             self.db_path = _DEFAULT_DB_PATH
 
+        self._pool: Any = None
+        self._pool_lock = threading.Lock()
         if self.backend == "sqlite":
             assert self.db_path is not None
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -261,8 +344,10 @@ class ForecastLedger:
         try:
             self._init_db()
         except LedgerUnavailableError:
+            self.close()
             raise
         except Exception as exc:
+            self.close()
             raise LedgerUnavailableError("Forecast ledger schema is unavailable") from exc
 
     @staticmethod
@@ -315,6 +400,43 @@ class ForecastLedger:
                 "Forecast ledger DATABASE_URL must use a PostgreSQL connection URL"
             )
 
+    def _ensure_pool(self) -> Any:
+        with self._pool_lock:
+            if self._pool is None:
+                import psycopg
+                from psycopg.rows import dict_row
+                from psycopg_pool import ConnectionPool
+
+                class _PooledPsycopgConnection(psycopg.Connection):
+                    @classmethod
+                    def connect(cls, conninfo="", **kwargs):
+                        return psycopg.connect(conninfo, **kwargs)
+
+                self._pool = ConnectionPool(
+                    conninfo=self.database_url or "",
+                    min_size=0,
+                    max_size=4,
+                    max_idle=120,
+                    timeout=float(self.connection_timeout_seconds),
+                    connection_class=_PooledPsycopgConnection,
+                    kwargs={
+                        "connect_timeout": self.connection_timeout_seconds,
+                        "row_factory": dict_row,
+                    },
+                    check=ConnectionPool.check_connection,
+                    open=True,
+                )
+            return self._pool
+
+    def close(self) -> None:
+        """Close the PostgreSQL connection pool if open."""
+        with self._pool_lock:
+            if self._pool is not None:
+                pool = self._pool
+                self._pool = None
+                with contextlib.suppress(Exception):
+                    pool.close()
+
     def _get_connection(self) -> _LedgerConnection:
         if self.backend == "sqlite":
             assert self.db_path is not None
@@ -329,14 +451,23 @@ class ForecastLedger:
 
         try:
             import psycopg
-            from psycopg.rows import dict_row
 
-            raw = psycopg.connect(
-                self.database_url,
-                connect_timeout=self.connection_timeout_seconds,
-                row_factory=dict_row,
-            )
-            return _LedgerConnection(raw, "postgres")
+            # When psycopg.connect is monkeypatched in unit tests, fail fast
+            # without waiting for ConnectionPool reconnect backoff.
+            if not getattr(psycopg.connect, "__module__", "").startswith("psycopg"):
+                from psycopg.rows import dict_row
+
+                raw = psycopg.connect(
+                    self.database_url,
+                    connect_timeout=self.connection_timeout_seconds,
+                    row_factory=dict_row,
+                )
+                return _LedgerConnection(raw, "postgres")
+
+            pool = self._ensure_pool()
+            pool_cm = pool.connection(timeout=float(self.connection_timeout_seconds))
+            raw = pool_cm.__enter__()
+            return _LedgerConnection(raw, "postgres", pool_cm=pool_cm)
         except Exception as exc:
             # Do not include the URL: it can contain a password and is never
             # safe to put in logs or an HTTP response.
@@ -937,6 +1068,7 @@ class ForecastLedger:
         status: str | None = None,
         record_source: str | None = None,
         limit: int = 50,
+        conn: _LedgerConnection | None = None,
     ) -> list[dict[str, Any]]:
         """Retrieve recent forecast ledger entries."""
         query = "SELECT * FROM forecast_ledger WHERE 1=1"
@@ -958,8 +1090,9 @@ class ForecastLedger:
         query += " ORDER BY forecast_date DESC, id DESC LIMIT ?"
         params.append(int(limit))
 
-        with self._get_connection() as conn:
-            cursor = conn.execute(query, params)
+        cm = contextlib.nullcontext(conn) if conn is not None else self._get_connection()
+        with cm as active_conn:
+            cursor = active_conn.execute(query, params)
             return [self._row_to_record(row).to_dict() for row in cursor.fetchall()]
 
     def get_track_record_metrics(
@@ -968,72 +1101,128 @@ class ForecastLedger:
         ticker: str | None = None,
         horizon: int | None = None,
         record_source: str = "live",
+        conn: _LedgerConnection | None = None,
     ) -> dict[str, Any]:
-        """Compute aggregate empirical track record accuracy metrics for a specific record source."""
-        query = "SELECT * FROM forecast_ledger WHERE record_source=?"
+        """Compute aggregate empirical track record accuracy metrics in SQL."""
+        # Portable counts/sums/averages + case-sensitive ':annualized_sigma_v1' suffix check.
+        # RMSE takes math.sqrt in Python so SQLite builds without SQRT() remain supported.
+        agg_query = (
+            _POSTGRES_TRACK_RECORD_AGG_SQL
+            if self.backend == "postgres"
+            else _SQLITE_TRACK_RECORD_AGG_SQL
+        )
         params: list[Any] = [str(record_source)]
 
         if ticker:
-            query += " AND ticker=?"
+            agg_query += " AND ticker=?"
             params.append(str(ticker).upper())
         if horizon:
-            query += " AND horizon=?"
+            agg_query += " AND horizon=?"
             params.append(int(horizon))
 
-        with self._get_connection() as conn:
-            cursor = conn.execute(query, params)
-            rows = cursor.fetchall()
+        cm = contextlib.nullcontext(conn) if conn is not None else self._get_connection()
+        with cm as active_conn:
+            agg_row = active_conn.execute(agg_query, params).fetchone()
+            if agg_row is None:
+                total_forecasts = 0
+                pending_forecasts = 0
+                scored_forecasts = 0
+            else:
+                total_forecasts = int(agg_row["total_forecasts"] or 0)
+                pending_forecasts = int(agg_row["pending_forecasts"] or 0)
+                scored_forecasts = int(agg_row["scored_forecasts"] or 0)
 
-        total_forecasts = len(rows)
-        pending_forecasts = sum(row["status"] == "pending" for row in rows)
-        rows = [row for row in rows if row["status"] == "scored"]
-        if not rows:
-            return {
-                "record_source": record_source,
-                "total_forecasts": total_forecasts,
-                "pending_forecasts": pending_forecasts,
-                "direction_metric_version": "annualized_sigma_v1",
-                "direction_eligible_forecasts": 0,
-                "scored_forecasts": 0,
-                "mean_mae": None,
-                "mean_rmse": None,
-                "mean_qlike": None,
-                "median_qlike": None,
-                "direction_accuracy_pct": None,
-            }
+            if scored_forecasts == 0 or agg_row is None:
+                return {
+                    "record_source": record_source,
+                    "total_forecasts": total_forecasts,
+                    "pending_forecasts": pending_forecasts,
+                    "direction_metric_version": "annualized_sigma_v1",
+                    "direction_eligible_forecasts": 0,
+                    "scored_forecasts": 0,
+                    "mean_mae": None,
+                    "mean_rmse": None,
+                    "mean_qlike": None,
+                    "median_qlike": None,
+                    "direction_accuracy_pct": None,
+                }
 
-        abs_errors = [row["abs_error"] for row in rows if row["abs_error"] is not None]
-        sq_errors = [
-            row["forecast_error"] ** 2 for row in rows if row["forecast_error"] is not None
-        ]
-        qlikes = [row["qlike_loss"] for row in rows if row["qlike_loss"] is not None]
+            qlike_count = int(agg_row["qlike_count"] or 0)
+            median_qlike: float | None = None
+            if self.backend == "postgres":
+                raw_med = agg_row["median_qlike"]
+                median_qlike = float(raw_med) if raw_med is not None else None
+            elif qlike_count > 0:
+                med_limit = 2 - (qlike_count % 2)
+                med_offset = (qlike_count - 1) // 2
+                med_query = (
+                    "SELECT qlike_loss FROM forecast_ledger "
+                    "WHERE record_source=? AND status = 'scored' AND qlike_loss IS NOT NULL"
+                )
+                if ticker:
+                    med_query += " AND ticker=?"
+                if horizon:
+                    med_query += " AND horizon=?"
+                med_query += " ORDER BY qlike_loss ASC LIMIT ? OFFSET ?"
+                med_rows = active_conn.execute(
+                    med_query, [*params, med_limit, med_offset]
+                ).fetchall()
+                if med_rows:
+                    med_vals = [float(r["qlike_loss"]) for r in med_rows]
+                    median_qlike = float(sum(med_vals) / len(med_vals))
 
-        direction_hits = 0
-        total_direction = 0
-        for r in rows:
-            if r["actual_realized_volatility"] is not None and str(r["model_version"]).endswith(
-                ":annualized_sigma_v1"
-            ):
-                pred_delta = r["predicted_volatility"] - r["recent_realized_volatility"]
-                actual_delta = r["actual_realized_volatility"] - r["recent_realized_volatility"]
-                if (pred_delta >= 0 and actual_delta >= 0) or (pred_delta < 0 and actual_delta < 0):
-                    direction_hits += 1
-                total_direction += 1
+        direction_eligible = int(agg_row["direction_eligible_forecasts"] or 0)
+        direction_hits = int(agg_row["direction_hits"] or 0)
+        mean_mae = float(agg_row["mean_mae"]) if agg_row["mean_mae"] is not None else None
+        mean_sq_error = agg_row["mean_sq_error"]
+        mean_rmse = math.sqrt(max(float(mean_sq_error), 0.0)) if mean_sq_error is not None else None
+        mean_qlike = float(agg_row["mean_qlike"]) if agg_row["mean_qlike"] is not None else None
 
         return {
             "record_source": record_source,
             "total_forecasts": total_forecasts,
             "pending_forecasts": pending_forecasts,
             "direction_metric_version": "annualized_sigma_v1",
-            "direction_eligible_forecasts": total_direction,
-            "scored_forecasts": len(rows),
-            "mean_mae": float(np.mean(abs_errors)) if abs_errors else None,
-            "mean_rmse": float(np.sqrt(np.mean(sq_errors))) if sq_errors else None,
-            "mean_qlike": float(np.mean(qlikes)) if qlikes else None,
-            "median_qlike": float(np.median(qlikes)) if qlikes else None,
+            "direction_eligible_forecasts": direction_eligible,
+            "scored_forecasts": scored_forecasts,
+            "mean_mae": mean_mae,
+            "mean_rmse": mean_rmse,
+            "mean_qlike": mean_qlike,
+            "median_qlike": median_qlike,
             "direction_accuracy_pct": (
-                float(direction_hits / total_direction * 100.0) if total_direction > 0 else None
+                float(direction_hits / direction_eligible * 100.0)
+                if direction_eligible > 0
+                else None
             ),
+        }
+
+    def get_ledger_overview(
+        self,
+        *,
+        ticker: str | None = None,
+        horizon: int | None = None,
+        record_source: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Fetch entries + live & replay track-record metrics reusing one DB connection."""
+        with self._get_connection() as conn:
+            entries = self.get_ledger_entries(
+                ticker=ticker,
+                horizon=horizon,
+                record_source=record_source,
+                limit=limit,
+                conn=conn,
+            )
+            live_metrics = self.get_track_record_metrics(
+                ticker=ticker, horizon=horizon, record_source="live", conn=conn
+            )
+            replay_metrics = self.get_track_record_metrics(
+                ticker=ticker, horizon=horizon, record_source="historical_replay", conn=conn
+            )
+        return {
+            "entries": entries,
+            "live_track_record": live_metrics,
+            "replay_track_record": replay_metrics,
         }
 
     def export_records(self, *, record_source: str | None = None) -> list[ForecastRecord]:
@@ -1325,6 +1514,7 @@ class ForecastLedger:
 
 _DEFAULT_LEDGER: ForecastLedger | None = None
 _DEFAULT_LEDGER_CONFIG: tuple[str | None, bool] | None = None
+_DEFAULT_LEDGER_LOCK = threading.Lock()
 
 
 def get_forecast_ledger(
@@ -1351,10 +1541,26 @@ def get_forecast_ledger(
     resolved_url = ForecastLedger._resolve_database_url(None)
     resolved_required = ForecastLedger._resolve_database_required()
     config_signature = (resolved_url, resolved_required)
-    if _DEFAULT_LEDGER is None or config_signature != _DEFAULT_LEDGER_CONFIG:
-        _DEFAULT_LEDGER = ForecastLedger(
-            database_url=resolved_url,
-            database_required=resolved_required,
-        )
-        _DEFAULT_LEDGER_CONFIG = config_signature
-    return _DEFAULT_LEDGER
+    with _DEFAULT_LEDGER_LOCK:
+        if _DEFAULT_LEDGER is None or config_signature != _DEFAULT_LEDGER_CONFIG:
+            previous = _DEFAULT_LEDGER
+            _DEFAULT_LEDGER = ForecastLedger(
+                database_url=resolved_url,
+                database_required=resolved_required,
+            )
+            _DEFAULT_LEDGER_CONFIG = config_signature
+            if previous is not None:
+                previous.close()
+        return _DEFAULT_LEDGER
+
+
+def close_forecast_ledger() -> None:
+    """Close and clear the process-shared default ledger (called on app shutdown)."""
+    global _DEFAULT_LEDGER, _DEFAULT_LEDGER_CONFIG
+    with _DEFAULT_LEDGER_LOCK:
+        if _DEFAULT_LEDGER is not None:
+            try:
+                _DEFAULT_LEDGER.close()
+            finally:
+                _DEFAULT_LEDGER = None
+                _DEFAULT_LEDGER_CONFIG = None

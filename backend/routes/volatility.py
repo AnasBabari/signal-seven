@@ -21,6 +21,7 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 
+from calendars import bypass_session_cache
 from data_pipeline import (
     MarketDataUnavailable,
     MarketTransportError,
@@ -42,7 +43,13 @@ from services.live_collection import (
     LIVE_UNIVERSE_VERSION,
     validate_live_collection_item,
 )
-from services.live_volatility import SUPPORTED_BASELINES, build_live_volatility_forecast
+from services.live_volatility import (
+    GPU_G3_MODEL,
+    SUPPORTED_BASELINES,
+    G3BatchContext,
+    build_live_volatility_forecast,
+    prepare_g3_batch_context,
+)
 from services.volatility_contract import (
     AUTO_MODEL_POLICY,
     VOLATILITY_FEATURE_SET_VERSION,
@@ -109,27 +116,41 @@ def require_collector_auth(
         )
 
 
-def _prepare_forecast(
-    symbol: str,
-    horizon: int,
-    requested_model: str,
-    *,
-    allow_post_close_grace: bool = False,
-) -> _PreparedForecast:
+def _load_snapshot(symbol: str, *, allow_post_close_grace: bool) -> Any:
     if (
         "allow_post_close_grace"
         in inspect.signature(build_volatility_inference_snapshot).parameters
     ):
-        snapshot = build_volatility_inference_snapshot(
+        return build_volatility_inference_snapshot(
             symbol, allow_post_close_grace=allow_post_close_grace
         )
+    return build_volatility_inference_snapshot(symbol)
+
+
+def _prepare_forecast_from_snapshot(
+    snapshot: Any,
+    symbol: str,
+    horizon: int,
+    requested_model: str,
+    *,
+    g3_context: G3BatchContext | None = None,
+) -> _PreparedForecast:
+    if (
+        g3_context is not None
+        and "g3_context" in inspect.signature(build_live_volatility_forecast).parameters
+    ):
+        forecast_result = build_live_volatility_forecast(
+            snapshot,
+            horizon=horizon,
+            model=requested_model,
+            g3_context=g3_context,
+        )
     else:
-        snapshot = build_volatility_inference_snapshot(symbol)
-    forecast_result = build_live_volatility_forecast(
-        snapshot,
-        horizon=horizon,
-        model=requested_model,
-    )
+        forecast_result = build_live_volatility_forecast(
+            snapshot,
+            horizon=horizon,
+            model=requested_model,
+        )
     code_commit = get_current_code_commit()
     data_as_of = str(getattr(snapshot, "data_as_of", None) or snapshot.origin_date)
     data_provider = getattr(snapshot, "data_provider", "unknown")
@@ -195,6 +216,17 @@ def _prepare_forecast(
         record_kwargs=record_kwargs,
         post_close_grace_used=grace_used,
     )
+
+
+def _prepare_forecast(
+    symbol: str,
+    horizon: int,
+    requested_model: str,
+    *,
+    allow_post_close_grace: bool = False,
+) -> _PreparedForecast:
+    snapshot = _load_snapshot(symbol, allow_post_close_grace=allow_post_close_grace)
+    return _prepare_forecast_from_snapshot(snapshot, symbol, horizon, requested_model)
 
 
 def _execute_forecast(
@@ -318,6 +350,139 @@ def volatility_forecast(
     return _execute_forecast(symbol, horizon, requested_model, record_live=False)
 
 
+def _parse_batch_horizons(raw_horizons: str) -> list[int]:
+    parts = [part.strip() for part in raw_horizons.split(",") if part.strip()]
+    if not parts:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Horizons must be a comma-separated subset of {list(VOLATILITY_HORIZONS)}.",
+        )
+    parsed: list[int] = []
+    for part in parts:
+        try:
+            value = validate_volatility_horizon(int(part))
+        except (TypeError, ValueError) as err:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Horizons must be a comma-separated subset of {list(VOLATILITY_HORIZONS)}.",
+            ) from err
+        if value not in parsed:
+            parsed.append(value)
+    return parsed
+
+
+@router.get("/api/v1/volatility/forecast/batch")
+@limiter.limit("30/minute")
+def volatility_forecast_batch(
+    request: Request,
+    ticker: str = Query(default="AAPL", min_length=1, max_length=12),
+    horizons: str = Query(default="5,10,20", min_length=1, max_length=40),
+    model: str = Query(default="auto"),
+) -> Any:
+    """Return read-only causal volatility forecasts across multiple horizons in one pass."""
+    symbol = validate_ticker(ticker)
+    parsed_horizons = _parse_batch_horizons(horizons)
+    requested_model = str(model).strip().lower()
+    if requested_model not in SUPPORTED_BASELINES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Model must be one of {list(SUPPORTED_BASELINES)}.",
+        )
+
+    try:
+        snapshot = _load_snapshot(symbol, allow_post_close_grace=True)
+    except UnknownTickerError as err:
+        raise HTTPException(
+            status_code=404, detail="No market data is available for this ticker."
+        ) from err
+    except (MarketTransportError, MarketContextUnavailable) as err:
+        logger.warning("Market data unavailable for %s: %s", symbol, type(err).__name__)
+        return JSONResponse(status_code=503, content=MARKET_DATA_UNAVAILABLE_BODY)
+    except MarketDataUnavailable as err:
+        raise HTTPException(
+            status_code=422,
+            detail="Not enough valid market history is available for this ticker.",
+        ) from err
+    except ValueError as err:
+        logger.info("Volatility batch request rejected for %s: %s", symbol, err)
+        raise HTTPException(
+            status_code=422,
+            detail="The volatility snapshot could not be formed from valid market data.",
+        ) from err
+    except Exception as err:
+        logger.exception("Volatility batch snapshot failed for %s", symbol)
+        raise HTTPException(
+            status_code=503,
+            detail="Volatility forecasting is temporarily unavailable. Please retry shortly.",
+        ) from err
+
+    g3_context: G3BatchContext | None = None
+    if requested_model == GPU_G3_MODEL:
+        try:
+            g3_context = prepare_g3_batch_context(snapshot)
+        except ValueError as err:
+            logger.info("Volatility batch G3 context rejected for %s: %s", symbol, err)
+            raise HTTPException(
+                status_code=422,
+                detail="The volatility snapshot could not be formed from valid market data.",
+            ) from err
+
+    forecasts: dict[str, dict[str, Any]] = {}
+    errors: dict[str, dict[str, str]] = {}
+    has_internal_error = False
+
+    for horizon in parsed_horizons:
+        try:
+            prepared = _prepare_forecast_from_snapshot(
+                snapshot,
+                symbol,
+                horizon,
+                requested_model,
+                g3_context=g3_context,
+            )
+            prepared.result.setdefault("evidence", {})["ledger_write"] = "disabled_public_preview"
+            forecasts[str(horizon)] = prepared.result
+        except ValueError as err:
+            logger.info("Volatility batch horizon %s rejected for %s: %s", horizon, symbol, err)
+            errors[str(horizon)] = {
+                "code": "HORIZON_UNAVAILABLE",
+                "message": "The volatility forecast could not be formed for this horizon.",
+            }
+        except Exception:
+            logger.exception("Volatility batch forecast failed for %s horizon %s", symbol, horizon)
+            has_internal_error = True
+            errors[str(horizon)] = {
+                "code": "FORECAST_ERROR",
+                "message": "Volatility forecasting is temporarily unavailable for this horizon.",
+            }
+
+    if not forecasts:
+        if has_internal_error:
+            raise HTTPException(
+                status_code=503,
+                detail="Volatility forecasting is temporarily unavailable. Please retry shortly.",
+            )
+        raise HTTPException(
+            status_code=422,
+            detail="The volatility snapshot could not be formed from valid market data.",
+        )
+
+    data_as_of = str(getattr(snapshot, "data_as_of", None) or snapshot.origin_date)
+    grace_used = bool(getattr(snapshot, "post_close_grace_used", False))
+    payload = {
+        "ticker": symbol,
+        "as_of": data_as_of,
+        "requested_model": requested_model,
+        "horizons": parsed_horizons,
+        "forecasts": forecasts,
+        "errors": errors,
+        "post_close_grace_used": grace_used,
+    }
+    if grace_used:
+        return JSONResponse(content=payload, headers={"Cache-Control": "no-store"})
+    return payload
+
+
 @router.post("/api/v1/volatility/collect")
 @limiter.limit("30/minute")
 def collect_volatility_forecast(
@@ -332,7 +497,8 @@ def collect_volatility_forecast(
         symbol, normalized_horizon = validate_live_collection_item(symbol, horizon)
     except (TypeError, ValueError) as err:
         raise HTTPException(status_code=400, detail=str(err)) from err
-    return _execute_forecast(symbol, normalized_horizon, "auto", record_live=True)
+    with bypass_session_cache():
+        return _execute_forecast(symbol, normalized_horizon, "auto", record_live=True)
 
 
 @router.get("/api/v1/volatility/ledger")
@@ -361,15 +527,23 @@ def get_volatility_ledger_route(
         return JSONResponse(status_code=503, content=FORECAST_LEDGER_UNAVAILABLE_BODY)
 
     try:
-        entries = ledger.get_ledger_entries(
-            ticker=symbol, horizon=horizon, record_source=record_source, limit=limit
-        )
-        live_metrics = ledger.get_track_record_metrics(
-            ticker=symbol, horizon=horizon, record_source="live"
-        )
-        replay_metrics = ledger.get_track_record_metrics(
-            ticker=symbol, horizon=horizon, record_source="historical_replay"
-        )
+        if hasattr(ledger, "get_ledger_overview"):
+            overview = ledger.get_ledger_overview(
+                ticker=symbol, horizon=horizon, record_source=record_source, limit=limit
+            )
+            entries = overview["entries"]
+            live_metrics = overview["live_track_record"]
+            replay_metrics = overview["replay_track_record"]
+        else:
+            entries = ledger.get_ledger_entries(
+                ticker=symbol, horizon=horizon, record_source=record_source, limit=limit
+            )
+            live_metrics = ledger.get_track_record_metrics(
+                ticker=symbol, horizon=horizon, record_source="live"
+            )
+            replay_metrics = ledger.get_track_record_metrics(
+                ticker=symbol, horizon=horizon, record_source="historical_replay"
+            )
 
         return {
             "ticker": symbol,
@@ -426,7 +600,8 @@ def score_volatility_ledger_route(
         logger.error("Forecast ledger unavailable while scoring %s", symbol)
         return JSONResponse(status_code=503, content=FORECAST_LEDGER_UNAVAILABLE_BODY)
     try:
-        df = _download_ohlcv(symbol)
+        with bypass_session_cache():
+            df = _download_ohlcv(symbol)
         if df is None or df.empty:
             raise HTTPException(
                 status_code=422, detail="No historical market data available for scoring."
@@ -461,6 +636,7 @@ __all__ = [
     "require_collector_auth",
     "router",
     "volatility_forecast",
+    "volatility_forecast_batch",
     "get_volatility_ledger_route",
     "score_volatility_ledger_route",
 ]

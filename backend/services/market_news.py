@@ -469,16 +469,19 @@ def get_exchange_market_close(symbol: str, session_date: str | None = None) -> d
     """Resolve the regular market close UTC timestamp for the ticker's exchange."""
     try:
         import pandas as pd
-        import pandas_market_calendars as mcal
 
-        from calendars import latest_completed_trading_session, resolve_calendar
+        from calendars import (
+            calendar_schedule,
+            completed_session_context,
+            resolve_calendar,
+        )
 
         cal_name, _ = resolve_calendar(symbol)
         mcal_name = "LSE" if cal_name == "LSE" else "NYSE"
         if not session_date:
-            session_date = latest_completed_trading_session(exchange=mcal_name).date().isoformat()
-        calendar = mcal.get_calendar(mcal_name)
-        schedule = calendar.schedule(start_date=session_date, end_date=session_date)
+            close_utc = completed_session_context(exchange=mcal_name).market_close_utc
+            return close_utc.to_pydatetime().astimezone(UTC)
+        schedule = calendar_schedule(mcal_name, start_date=session_date, end_date=session_date)
         if not schedule.empty and "market_close" in schedule.columns:
             close_ts = schedule.iloc[0]["market_close"]
             if isinstance(close_ts, pd.Timestamp):

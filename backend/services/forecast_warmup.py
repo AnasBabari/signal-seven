@@ -34,12 +34,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_WARMUP_TICKERS: tuple[str, ...] = (
     "AAPL",
     "MSFT",
-    "NVDA",
-    "GOOGL",
-    "AMZN",
-    "META",
-    "TSLA",
-    "AMD",
 )
 
 _started = False
@@ -121,7 +115,7 @@ def start_forecast_warmup() -> bool:
     if _running_under_pytest():
         return False
 
-    limit = int(getattr(settings, "forecast_warmup_max_tickers", 8) or 0)
+    limit = int(getattr(settings, "forecast_warmup_max_tickers", 2) or 0)
     if limit <= 0:
         return False
 
