@@ -18,7 +18,6 @@ services:
         - backend/**
         - requirements.txt
         - render.yaml
-        - scripts/check_deployment.py
       ignoredPaths:
         - assets/**
         - docs/**
@@ -72,16 +71,3 @@ services:
         value: "4"
       - key: PREDICTION_TIMEOUT_SECONDS
         value: "600"
-      # This Ed25519 key is public and pinned in the image. The archive URL and
-      # digest remain dashboard-managed until locked certification succeeds.
-      - key: VOLATILITY_PUBLIC_KEY_PATH
-        value: backend/release_keys/volatility-v1.public.pem
-      - key: VOLATILITY_RELEASE_ARCHIVE_URL
-        sync: false
-      - key: VOLATILITY_RELEASE_ARCHIVE_SHA256
-        sync: false
-      # Serving stays optional until a candidate completes locked
-      # certification. With no archive URL/digest, /api/v2/forecast abstains
-      # instead of serving a baseline.
-      - key: VOLATILITY_SERVING_REQUIRED
-        value: "false"

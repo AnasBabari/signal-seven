@@ -22,7 +22,6 @@ from data_pipeline import (
     market_circuit_breaker,
 )
 from routes.common import limiter, validate_ticker
-from routes.health import deployment_identity as _deployment_identity
 from routes.health import router as health_router
 from routes.market import router as market_router
 from routes.simple_forecast import router as simple_forecast_router
@@ -80,18 +79,14 @@ async def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
 
 
 # ── CORS Middleware ──────────────────────────────────────────────────
-_preview_cors_regex = (
-    settings.preview_cors_origin_regex
-    if _deployment_identity()["preview"] and settings.preview_cors_origin_regex
-    else None
-)
+_preview_cors_regex = settings.preview_cors_origin_regex or None
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,
     allow_origin_regex=_preview_cors_regex,
     allow_credentials=False,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type", "X-Prediction-Request-ID", "X-Client-Class"],
 )
 
@@ -101,7 +96,9 @@ app.add_middleware(
 async def _security_headers(request: Request, call_next):
     response = await call_next(request)
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
     return response
 
 

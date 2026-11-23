@@ -1,6 +1,6 @@
 """Application configuration with environment variable support (4.2)."""
 
-import re
+import os
 import tempfile
 import tomllib
 from ipaddress import ip_address, ip_network
@@ -221,37 +221,6 @@ class Settings(BaseSettings):
                 raise ValueError(f"Invalid IP address or CIDR: {val}") from err
         return list(dict.fromkeys(normalised))
 
-    @model_validator(mode="after")
-    def validate_volatility_release_source(self):
-        """Require an immutable digest whenever remote release bootstrap is enabled."""
-        url = (self.volatility_release_archive_url or "").strip()
-        digest = (self.volatility_release_archive_sha256 or "").strip().lower()
-        local_dir = (self.volatility_release_dir or "").strip()
-        public_key = (self.volatility_public_key_path or "").strip()
-        if bool(url) != bool(digest):
-            raise ValueError(
-                "VOLATILITY_RELEASE_ARCHIVE_URL and "
-                "VOLATILITY_RELEASE_ARCHIVE_SHA256 must be configured together"
-            )
-        if local_dir and url:
-            raise ValueError(
-                "configure exactly one volatility release source: "
-                "VOLATILITY_RELEASE_DIR or VOLATILITY_RELEASE_ARCHIVE_URL"
-            )
-        if url and not url.lower().startswith("https://"):
-            raise ValueError("VOLATILITY_RELEASE_ARCHIVE_URL must use HTTPS")
-        if digest and not re.fullmatch(r"[0-9a-f]{64}", digest):
-            raise ValueError("VOLATILITY_RELEASE_ARCHIVE_SHA256 must be 64 lowercase hex digits")
-        if (url or local_dir) and not public_key:
-            raise ValueError(
-                "VOLATILITY_PUBLIC_KEY_PATH is required when a volatility release source is configured"
-            )
-        self.volatility_release_dir = local_dir or None
-        self.volatility_public_key_path = public_key or None
-        self.volatility_release_archive_url = url or None
-        self.volatility_release_archive_sha256 = digest or None
-        return self
-
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",
@@ -259,9 +228,34 @@ class Settings(BaseSettings):
     }
 
 
+def resolve_allowed_origins(
+    default_origins: list[str],
+    cors_origin: str | None,
+    *,
+    is_production: bool,
+    has_explicit_allowed_origins: bool = False,
+) -> list[str]:
+    """Resolve CORS origins, failing closed (no localhost defaults) in production."""
+    configured = [item.strip() for item in str(cors_origin or "").split(",") if item.strip()]
+    if is_production:
+        if has_explicit_allowed_origins:
+            return list(dict.fromkeys([*default_origins, *configured]))
+        return list(dict.fromkeys(configured))
+    if configured:
+        return list(dict.fromkeys([*default_origins, *configured]))
+    return list(default_origins)
+
+
 settings = Settings()
-if settings.cors_origin:
-    settings.allowed_origins.append(settings.cors_origin)
+_is_prod = (
+    settings.deployment_environment or os.getenv("ENVIRONMENT") or ""
+).strip().lower() == "production" or bool(os.getenv("RENDER"))
+settings.allowed_origins = resolve_allowed_origins(
+    settings.allowed_origins,
+    settings.cors_origin,
+    is_production=_is_prod,
+    has_explicit_allowed_origins="allowed_origins" in settings.model_fields_set,
+)
 
 # Backward-compatible module-level constants
 DEFAULT_TICKER = settings.default_ticker

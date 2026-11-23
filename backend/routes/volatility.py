@@ -15,9 +15,9 @@ import os
 import secrets
 from dataclasses import dataclass
 from datetime import date
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 
 from data_pipeline import (
@@ -83,27 +83,26 @@ def require_collector_auth(
         raise HTTPException(status_code=503, detail="Collector authentication is unavailable.")
     scheme, separator, candidate = (authorization or "").partition(" ")
     candidate = candidate.strip().strip("\"'")
+    if not authorization:
+        scheme_kind = "none"
+    elif separator == " " and scheme.lower() == "bearer":
+        scheme_kind = "bearer"
+    else:
+        scheme_kind = "other"
     authenticated = (
-        separator == " "
-        and scheme.lower() == "bearer"
+        scheme_kind == "bearer"
         and bool(candidate)
-        and secrets.compare_digest(candidate, configured)
+        and secrets.compare_digest(candidate.encode("utf-8"), configured.encode("utf-8"))
     )
     if not authenticated:
-        mismatch_hint = (
-            f"token length mismatch (received {len(candidate)}, expected {len(configured)})"
-            if len(candidate) != len(configured)
-            else "token value mismatch"
-        )
         logger.warning(
-            "Collector auth failed: scheme=%s, candidate_len=%d, configured_len=%d",
-            scheme,
-            len(candidate),
-            len(configured),
+            "Collector auth failed: scheme=%s, has_candidate=%s",
+            scheme_kind,
+            bool(candidate),
         )
         raise HTTPException(
             status_code=401,
-            detail=f"Collector authentication failed ({mismatch_hint}).",
+            detail="Collector authentication failed.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -315,7 +314,7 @@ def get_volatility_ledger_route(
     request: Request,
     ticker: str = Query(default="AAPL", min_length=1, max_length=12),
     horizon: int | None = Query(default=None, ge=1, le=20),
-    record_source: str | None = Query(default=None),
+    record_source: Literal["live", "historical_replay"] | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict[str, Any]:
     """Retrieve historical forecast ledger and empirical accuracy track record."""
@@ -365,12 +364,14 @@ def get_volatility_ledger_route(
 @limiter.limit("10/minute")
 def export_live_volatility_ledger(
     request: Request,
+    response: Response,
     _authorization: Annotated[None, Depends(require_collector_auth)],
 ) -> Any:
     """Return the complete deterministic live track for authenticated backups."""
     try:
         ledger = get_forecast_ledger()
         records = [record.to_dict() for record in ledger.export_records(record_source="live")]
+        response.headers["Cache-Control"] = "no-store"
         return {
             "record_source": "live",
             "storage_backend": ledger.storage_kind,
