@@ -14,7 +14,11 @@ from data_pipeline import market_circuit_breaker, market_data_service
 from services.forecast_ledger import LedgerUnavailableError, get_forecast_ledger
 from services.live_volatility import SUPPORTED_BASELINES
 from services.simple_forecast import FEATURE_VERSION, SUPPORTED_TICKERS, get_auto_candidate_names
-from services.volatility_contract import AUTO_MODEL_POLICY, VOLATILITY_MODEL_POLICY_VERSION
+from services.volatility_contract import (
+    VOLATILITY_MODEL_POLICY_VERSION,
+    resolve_auto_model_policy,
+    resolve_volatility_policy_name,
+)
 from services.volatility_snapshot import VOLATILITY_HORIZONS
 
 router = APIRouter(tags=["health"])
@@ -156,8 +160,9 @@ def models_discovery():
             "supported_horizons": list(VOLATILITY_HORIZONS),
             "supported_models": list(SUPPORTED_BASELINES),
             "model_policy_version": VOLATILITY_MODEL_POLICY_VERSION,
+            "default_policy": resolve_volatility_policy_name(),
             "auto_model_policy": {
-                str(horizon): model for horizon, model in AUTO_MODEL_POLICY.items()
+                str(horizon): model for horizon, model in resolve_auto_model_policy().items()
             },
         },
         "training_capacity": {

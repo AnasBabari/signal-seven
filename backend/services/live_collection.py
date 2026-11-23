@@ -6,10 +6,7 @@ from datetime import date
 from itertools import product
 from types import MappingProxyType
 
-from services.volatility_contract import (
-    AUTO_MODEL_POLICY,
-    SUPPORTED_VOLATILITY_HORIZONS,
-)
+from services.volatility_contract import SUPPORTED_VOLATILITY_HORIZONS
 
 LIVE_UNIVERSE_V1 = (
     "MSFT",
@@ -32,7 +29,16 @@ LIVE_HORIZONS_V1 = SUPPORTED_VOLATILITY_HORIZONS
 LIVE_UNIVERSE_VERSION = "live_universe_v1"
 LIVE_START_DATE = date.fromisoformat("2026-09-02")
 
-LIVE_MODEL_POLICY_V1 = MappingProxyType(dict(AUTO_MODEL_POLICY))
+# Operational V1 live-collection policy is frozen independently of public
+# VOLATILITY_DEFAULT_POLICY so public routing experiments never break V1 ledger continuity.
+LIVE_MODEL_POLICY_V1 = MappingProxyType(
+    {
+        1: "garch_11",
+        5: "rolling_mean",
+        10: "rolling_mean",
+        20: "rolling_mean",
+    }
+)
 LIVE_COLLECTION_ITEMS_V1 = tuple(product(LIVE_UNIVERSE_V1, LIVE_HORIZONS_V1))
 LIVE_EXPECTED_RECORD_COUNT = len(LIVE_COLLECTION_ITEMS_V1)
 

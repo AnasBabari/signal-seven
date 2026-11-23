@@ -51,10 +51,11 @@ from services.live_volatility import (
     prepare_g3_batch_context,
 )
 from services.volatility_contract import (
-    AUTO_MODEL_POLICY,
     VOLATILITY_FEATURE_SET_VERSION,
     VOLATILITY_MODEL_POLICY_VERSION,
     VOLATILITY_MODEL_VERSION,
+    resolve_auto_model_policy,
+    resolve_volatility_policy_name,
     validate_volatility_horizon,
 )
 from services.volatility_snapshot import VOLATILITY_HORIZONS, build_volatility_inference_snapshot
@@ -154,14 +155,16 @@ def _prepare_forecast_from_snapshot(
     code_commit = get_current_code_commit()
     data_as_of = str(getattr(snapshot, "data_as_of", None) or snapshot.origin_date)
     data_provider = getattr(snapshot, "data_provider", "unknown")
+    active_policy = resolve_auto_model_policy()
     evidence = forecast_result.setdefault("evidence", {})
     evidence.update(
         {
             "code_commit": code_commit,
             "model_policy_version": VOLATILITY_MODEL_POLICY_VERSION,
+            "default_policy": resolve_volatility_policy_name(),
             "auto_model_policy": {
                 str(policy_horizon): policy_model
-                for policy_horizon, policy_model in AUTO_MODEL_POLICY.items()
+                for policy_horizon, policy_model in active_policy.items()
             },
         }
     )
@@ -417,7 +420,12 @@ def volatility_forecast_batch(
         ) from err
 
     g3_context: G3BatchContext | None = None
-    if requested_model == GPU_G3_MODEL:
+    active_policy = resolve_auto_model_policy()
+    needs_g3 = requested_model == GPU_G3_MODEL or (
+        requested_model == "auto"
+        and any(active_policy.get(h) == GPU_G3_MODEL for h in parsed_horizons)
+    )
+    if needs_g3:
         try:
             g3_context = prepare_g3_batch_context(snapshot)
         except ValueError as err:
@@ -497,8 +505,9 @@ def collect_volatility_forecast(
         symbol, normalized_horizon = validate_live_collection_item(symbol, horizon)
     except (TypeError, ValueError) as err:
         raise HTTPException(status_code=400, detail=str(err)) from err
+    pinned_model = LIVE_MODEL_POLICY_V1[normalized_horizon]
     with bypass_session_cache():
-        return _execute_forecast(symbol, normalized_horizon, "auto", record_live=True)
+        return _execute_forecast(symbol, normalized_horizon, pinned_model, record_live=True)
 
 
 @router.get("/api/v1/volatility/ledger")

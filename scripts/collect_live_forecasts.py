@@ -251,10 +251,11 @@ def run_preflight(
 
     commits: set[str] = set()
     for index, (ticker, horizon) in enumerate(LIVE_COLLECTION_ITEMS_V1):
+        pinned_model = LIVE_MODEL_POLICY_V1[horizon]
         response = client.request(
             "GET",
             "/api/v1/volatility/forecast",
-            params={"ticker": ticker, "horizon": horizon, "model": "auto"},
+            params={"ticker": ticker, "horizon": horizon, "model": pinned_model},
         )
         evidence = response.payload.get("evidence", {})
         errors = (

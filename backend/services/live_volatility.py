@@ -13,11 +13,12 @@ from typing import Any
 import numpy as np
 
 from services.volatility_contract import (
-    AUTO_MODEL_POLICY,
     SUPPORTED_VOLATILITY_HORIZONS,
     VOLATILITY_FEATURE_SET_VERSION,
     VOLATILITY_MODEL_POLICY_VERSION,
     VOLATILITY_MODEL_VERSION,
+    resolve_auto_model_policy,
+    resolve_volatility_policy_name,
     validate_volatility_horizon,
 )
 from services.volatility_snapshot import VolatilityInferenceSnapshot, get_garch_variance_path
@@ -51,7 +52,7 @@ def _candidate_name(model: str, horizon: int = 5) -> str:
         raise ValueError(f"model must be one of {', '.join(SUPPORTED_BASELINES)}")
     normalized_horizon = validate_volatility_horizon(horizon)
     if name == "auto":
-        return AUTO_MODEL_POLICY[normalized_horizon]
+        return resolve_auto_model_policy()[normalized_horizon]
     return name
 
 
@@ -267,6 +268,13 @@ def _build_g3_forecast(
     if len(future_dates) != horizon:
         raise ValueError("calendar did not provide the requested forecast horizon")
     learned = model_name == GPU_G3_MODEL
+    m5_provenance = g3.get_m5_validation_provenance(horizon) if learned else None
+    promoted_qlike = (
+        m5_provenance["delta_qlike_vs_rolling_mean_60d"]
+        if (m5_provenance is not None and m5_provenance.get("promote_g3_to_auto"))
+        else None
+    )
+    active_policy = resolve_auto_model_policy()
     risk = (
         _trailing_risk_context(frame, variance / horizon)
         if learned
@@ -302,13 +310,15 @@ def _build_g3_forecast(
             if learned
             else VOLATILITY_FEATURE_SET_VERSION,
             "model_policy_version": VOLATILITY_MODEL_POLICY_VERSION,
+            "default_policy": resolve_volatility_policy_name(),
             "auto_model_policy": {
                 str(policy_horizon): policy_model
-                for policy_horizon, policy_model in AUTO_MODEL_POLICY.items()
+                for policy_horizon, policy_model in active_policy.items()
             },
             "selected_horizon": horizon,
             "fallback_used": fallback_reason,
-            "test_evidence_qlike_vs_rolling": None,
+            "test_evidence_qlike_vs_rolling": promoted_qlike,
+            "m5_validation_provenance": m5_provenance,
             "risk_level": risk.get("risk_level"),
             "risk_ratio_vs_trailing_60d": risk.get("risk_ratio_vs_trailing_60d"),
             "trailing_annualized_volatility_60d": risk.get("trailing_annualized_volatility_60d"),
@@ -350,11 +360,12 @@ def build_live_volatility_forecast(
     """Return a transparent volatility cone and its matched baseline metadata."""
     normalized_horizon = validate_volatility_horizon(horizon)
     requested_model = str(model).strip().lower()
-    if requested_model == GPU_G3_MODEL:
+    model_name = _candidate_name(requested_model, normalized_horizon)
+    if model_name == GPU_G3_MODEL:
         return _build_g3_forecast(
             snapshot, normalized_horizon, requested_model, g3_context=g3_context
         )
-    model_name = _candidate_name(requested_model, normalized_horizon)
+    active_policy = resolve_auto_model_policy()
     variance = _variance_for(snapshot, model_name, normalized_horizon)
     variance_path = _variance_path_for(snapshot, model_name, normalized_horizon)
     annualized = float(np.sqrt(variance / normalized_horizon * _TRADING_SESSIONS_PER_YEAR))
@@ -393,9 +404,10 @@ def build_live_volatility_forecast(
             "model_version": VOLATILITY_MODEL_VERSION,
             "feature_set_version": VOLATILITY_FEATURE_SET_VERSION,
             "model_policy_version": VOLATILITY_MODEL_POLICY_VERSION,
+            "default_policy": resolve_volatility_policy_name(),
             "auto_model_policy": {
                 str(policy_horizon): policy_model
-                for policy_horizon, policy_model in AUTO_MODEL_POLICY.items()
+                for policy_horizon, policy_model in active_policy.items()
             },
             "selected_horizon": normalized_horizon,
             "scenario_label": "gaussian_model_implied_price_range",

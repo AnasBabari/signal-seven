@@ -30,6 +30,57 @@ logger = logging.getLogger(__name__)
 G3_MODEL_VERSION = "g3-qlike-base-margin-v2"
 G3_FEATURE_SET_VERSION = "vol-gpu-panel-v1"
 G3_HORIZONS = (5, 10, 20)
+M5_EVALUATION_SNAPSHOT = "m5_purged_oos_2023-11-16_2026-11-20"
+M5_COMPARATOR = "rolling_mean_60d"
+
+# Locked out-of-sample Milestone 05 evaluation provenance keyed strictly by
+# (horizon, onnx_sha256). Changing the artifact binary invalidates the binding
+# until the new SHA-256 is evaluated on the purged out-of-sample protocol.
+M5_LOCKED_G3_EVIDENCE: dict[tuple[int, str], dict[str, Any]] = {
+    (5, "8bccde12efb4bf5089ce3cd704cc027653f916f0547ddb5a4404587513d76a93"): {
+        "artifact_sha256": "8bccde12efb4bf5089ce3cd704cc027653f916f0547ddb5a4404587513d76a93",
+        "horizon": 5,
+        "comparator": M5_COMPARATOR,
+        "evaluation_snapshot": M5_EVALUATION_SNAPSHOT,
+        "delta_qlike_vs_rolling_mean_60d": 0.0592,
+        "relative_improvement_pct": 10.7,
+        "hac_t_stat": 3.64,
+        "p_holm": 8.27e-4,
+        "win_rate": 0.80,
+        "win_count": 24,
+        "universe_count": 30,
+        "gate_status": "PASS_POOLED_CAVEAT_LSE_MZ",
+        "promote_g3_to_auto": False,
+    },
+    (10, "5014ff1bf2c31e19e00061099748bdba75ca8f4451b0602d7f3384a044f89fbc"): {
+        "artifact_sha256": "5014ff1bf2c31e19e00061099748bdba75ca8f4451b0602d7f3384a044f89fbc",
+        "horizon": 10,
+        "comparator": M5_COMPARATOR,
+        "evaluation_snapshot": M5_EVALUATION_SNAPSHOT,
+        "delta_qlike_vs_rolling_mean_60d": 0.0519,
+        "relative_improvement_pct": 13.3,
+        "p_holm": 5.63e-3,
+        "win_rate": 0.80,
+        "win_count": 24,
+        "universe_count": 30,
+        "gate_status": "FAIL_POOLED_MZ_AND_LSE_HAC_CI",
+        "promote_g3_to_auto": False,
+    },
+    (20, "79ee8efcf10322ed6fd70f6a382a9aec430bce4eef7e410273b1a30d54665325"): {
+        "artifact_sha256": "79ee8efcf10322ed6fd70f6a382a9aec430bce4eef7e410273b1a30d54665325",
+        "horizon": 20,
+        "comparator": M5_COMPARATOR,
+        "evaluation_snapshot": M5_EVALUATION_SNAPSHOT,
+        "delta_qlike_vs_rolling_mean_60d": 0.0418,
+        "relative_improvement_pct": 14.6,
+        "hac_t_stat": 1.82,
+        "p_holm": 0.0686,
+        "win_rate": 0.60,
+        "universe_count": 30,
+        "gate_status": "FAIL_HAC_AND_LSE_BREADTH",
+        "promote_g3_to_auto": False,
+    },
+}
 G3_FEATURES: tuple[str, ...] = (
     "rv_5",
     "rv_10",
@@ -274,6 +325,20 @@ def _load_metadata(horizon: int) -> dict:
         return meta
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise G3UnavailableError("G3 metadata is missing or incompatible") from exc
+
+
+def get_m5_validation_provenance(
+    horizon: int, artifact_sha256: str | None = None
+) -> dict[str, Any] | None:
+    """Return M5 out-of-sample validation evidence bound strictly to (horizon, onnx_sha256)."""
+    sha = artifact_sha256
+    if sha is None:
+        try:
+            sha = str(_load_metadata(horizon).get("onnx_sha256", ""))
+        except G3UnavailableError:
+            return None
+    record = M5_LOCKED_G3_EVIDENCE.get((int(horizon), str(sha).strip().lower()))
+    return dict(record) if record is not None else None
 
 
 def extract_g3_latest_row(frame: pd.DataFrame) -> np.ndarray:
