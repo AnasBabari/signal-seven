@@ -1,34 +1,56 @@
 import React, { useEffect, useState } from 'react';
 import { fetchForecastLedger } from '../api/forecastLedgerClient';
 
-export default function ForecastLedgerTrackRecord({ ticker, horizon, defaultOpen = false }) {
+export default function ForecastLedgerTrackRecord({ ticker, horizon, defaultOpen = false, enabled = true }) {
   const [isOpen, setIsOpen] = useState(defaultOpen);
   const [ledgerData, setLedgerData] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
+  const [status, setStatus] = useState('idle'); // 'idle' | 'loading' | 'ready' | 'error'
   const [activeTab, setActiveTab] = useState('all'); // 'all' | 'live' | 'historical_replay'
+  const [latchedTicker, setLatchedTicker] = useState(enabled && ticker ? ticker : null);
+
+  useEffect(() => {
+    if (enabled && ticker) {
+      setLatchedTicker(ticker);
+    }
+  }, [enabled, ticker]);
+
+  const shouldFetch = Boolean(ticker) && (enabled || latchedTicker === ticker);
+
   useEffect(() => {
     setLedgerData(null);
-    setError(null);
     setActiveTab('all');
-    if (!ticker || !isOpen) {
-      setLoading(false);
+    if (!shouldFetch) {
+      setStatus('idle');
       return undefined;
     }
     const controller = new AbortController();
-    setLoading(true);
+    setStatus('loading');
     fetchForecastLedger(ticker, horizon, controller.signal)
-      .then((data) => { if (!controller.signal.aborted) setLedgerData(data); })
-      .catch((err) => { if (!controller.signal.aborted) setError(err.message); })
-      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+      .then((data) => {
+        if (!controller.signal.aborted) {
+          setLedgerData(data);
+          setStatus('ready');
+        }
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setStatus('error');
+        }
+      });
     return () => controller.abort();
-  }, [ticker, horizon, isOpen]);
+  }, [ticker, horizon, shouldFetch]);
 
-  if (!ticker) return null;
+  if (!ticker || status !== 'ready' || !ledgerData) return null;
 
   const liveTrack = ledgerData?.live_track_record || {};
   const replayTrack = ledgerData?.replay_track_record || {};
+  const trackRecord = ledgerData?.track_record || {};
   const allEntries = ledgerData?.entries || [];
+  const totalForecasts = Number(liveTrack.total_forecasts ?? 0)
+    + Number(replayTrack.total_forecasts ?? 0)
+    + Number(trackRecord.total_forecasts ?? 0);
+
+  if (allEntries.length === 0 && totalForecasts === 0) return null;
 
   const filteredEntries = allEntries.filter((entry) => {
     if (activeTab === 'live') return entry.record_source === 'live';
@@ -75,15 +97,8 @@ export default function ForecastLedgerTrackRecord({ ticker, horizon, defaultOpen
           This history evaluates past volatility estimates against realised market movements. It is strictly separate from the price model evaluation.
         </p>
 
-        {loading ? (
-          <div className="ledger-loading-state" role="status">Loading past forecasts…</div>
-        ) : error ? (
-          <div className="ledger-error-state" role="alert">Past forecasts are unavailable right now.</div>
-        ) : allEntries.length === 0 ? (
-          <p className="ledger-empty-sentence">No past recorded forecasts for this ticker yet.</p>
-        ) : (
-          <>
-            <div className="ledger-tab-group">
+        <>
+          <div className="ledger-tab-group">
               <button
                 className={`ledger-tab-btn ${activeTab === 'all' ? 'active' : ''}`}
                 onClick={() => setActiveTab('all')}
@@ -231,7 +246,6 @@ export default function ForecastLedgerTrackRecord({ ticker, horizon, defaultOpen
               </table>
             </div>
           </>
-        )}
       </div>
     </details>
   );

@@ -305,6 +305,7 @@ export default function App() {
       return;
     }
 
+    setInputTicker(symbol);
     if (forceRefresh) {
       setRefreshToken((value) => value + 1);
     }
@@ -642,7 +643,7 @@ export default function App() {
                   </div>
                 )}
 
-                <ForecastLedgerTrackRecord ticker={chartTicker} />
+                <ForecastLedgerTrackRecord ticker={chartTicker} enabled={activeTab === 'performance'} />
 
                 {perf && (
                   <details className="perf-technical-details">

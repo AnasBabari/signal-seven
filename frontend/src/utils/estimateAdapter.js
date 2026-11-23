@@ -1,7 +1,7 @@
-/** One validated seven-session midpoint series for the chart and summary. */
+/** One validated seven-session midpoint and range series for the chart and summary. */
 const unavailable = (reason, mismatchReason = null) => ({
   isAvailable: false, isMismatch: Boolean(mismatchReason), reason, mismatchReason,
-  series: [], futureDates: [], finalPrice: null, changePct: null, direction: 'flat',
+  series: [], lowerSeries: [], upperSeries: [], futureDates: [], finalPrice: null, changePct: null, direction: 'flat',
 });
 const positive = (value) => (typeof value === 'number' || typeof value === 'string')
   && String(value).trim() !== '' && Number.isFinite(Number(value)) && Number(value) > 0;
@@ -23,14 +23,20 @@ export function getSharedEstimatePresentation({ forecast, history, currencySymbo
   }
   let previous = forecast.data_as_of;
   const series = [];
+  const lowerSeries = [];
+  const upperSeries = [];
   for (let i = 0; i < 7; i += 1) {
     if (!validDate(dates[i]) || dates[i] <= previous) return unavailable('invalid_dates');
     previous = dates[i];
     if (!positive(lower[i]) || !positive(upper[i]) || Number(lower[i]) > Number(upper[i])) {
       return unavailable('invalid_bounds');
     }
-    const midpoint = Number(lower[i]) / 2 + Number(upper[i]) / 2;
+    const lowValue = Number(lower[i]);
+    const highValue = Number(upper[i]);
+    const midpoint = lowValue / 2 + highValue / 2;
     if (!Number.isFinite(midpoint)) return unavailable('invalid_bounds');
+    lowerSeries.push(lowValue);
+    upperSeries.push(highValue);
     series.push(midpoint);
   }
   const lastBar = Array.isArray(history?.daily) ? history.daily.at(-1) : null;
@@ -57,8 +63,9 @@ export function getSharedEstimatePresentation({ forecast, history, currencySymbo
   if (!Number.isFinite(changePct)) return unavailable('invalid_bounds');
   return {
     isAvailable: true, isMismatch: false, mismatchReason: null, reason: null,
-    series, futureDates: [...dates], finalPrice, changePct,
+    series, lowerSeries, upperSeries, futureDates: [...dates], finalPrice, changePct,
     label: 'Range midpoint — experimental',
+    rangeLabel: 'Historical error range (experimental)',
     pointEstimate: Array.isArray(forecast.predicted_prices) && forecast.predicted_prices.length === 7
       && forecast.predicted_prices.every(positive) ? Number(forecast.predicted_prices[6]) : null,
     midpointEvaluation: 'unavailable',

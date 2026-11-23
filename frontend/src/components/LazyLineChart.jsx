@@ -1,16 +1,19 @@
-import React, { forwardRef, useState, useEffect } from 'react';
+import React, { forwardRef, useState, useEffect, useRef } from 'react';
 import { withDeadline } from '../api/request';
 
 const loadChartEngine = () => Promise.all([import('chart.js'), import('react-chartjs-2')]);
 
-const LazyLineChart = forwardRef(function LazyLineChart({ loadEngine = loadChartEngine, ...props }, ref) {
+const LazyLineChart = forwardRef(function LazyLineChart({ loadEngine = loadChartEngine, onErrorChange = null, ...props }, ref) {
   const [error, setError] = useState(false);
   const [retry, setRetry] = useState(0);
   const [LineComponent, setLineComponent] = useState(null);
+  const onErrorChangeRef = useRef(onErrorChange);
+  onErrorChangeRef.current = onErrorChange;
 
   useEffect(() => {
     let isMounted = true;
     setError(false);
+    onErrorChangeRef.current?.(false);
     withDeadline(() => loadEngine(), { timeoutMs: 20_000 })
       .then(([chartJsModule, reactChartJsModule]) => {
         if (!isMounted) return;
@@ -40,7 +43,10 @@ const LazyLineChart = forwardRef(function LazyLineChart({ loadEngine = loadChart
         setLineComponent(() => reactChartJsModule.Line);
       })
       .catch(() => {
-        if (isMounted) setError(true);
+        if (isMounted) {
+          setError(true);
+          onErrorChangeRef.current?.(true);
+        }
       });
 
     return () => {
@@ -50,7 +56,7 @@ const LazyLineChart = forwardRef(function LazyLineChart({ loadEngine = loadChart
 
   if (error) return <div role="alert" className="chart-engine-error">
     Chart could not load. Prices remain available in the data table below.
-    <button type="button" onClick={() => setRetry((value) => value + 1)}>Retry chart engine</button>
+    <button type="button" className="retry-action-btn" onClick={() => setRetry((value) => value + 1)}>Retry chart engine</button>
   </div>;
 
   if (!LineComponent) {

@@ -1,6 +1,6 @@
 import React from 'react';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import PriceChart from './PriceChart';
 
 vi.mock('../hooks/usePriceHistory', () => ({
@@ -86,31 +86,65 @@ describe('PriceChart', () => {
     expect(screen.getByText(/\+5\.56%/)).toBeInTheDocument();
   });
 
-  it('switches ranges and overlays the forecast path', () => {
+  it('switches ranges and overlays the anchored midpoint and historical error range (experimental)', () => {
     usePriceHistory.mockReturnValue({ history: historyFixture(300, true), loading: false, error: '', retry: vi.fn() });
     render(<PriceChart ticker="MSFT" currencySymbol="$" forecast={forecastFixture} />);
     fireEvent.click(screen.getByRole('button', { name: '1M' }));
     expect(screen.getByRole('button', { name: '1M' })).toHaveAttribute('aria-pressed', 'true');
+    const roles = lastChartProps.data.datasets.map((ds) => ds.role);
+    expect(roles).toEqual(['history', 'band-upper', 'band-lower', 'midpoint']);
     const labels = lastChartProps.data.datasets.map((ds) => ds.label);
     expect(labels).toContain('Price');
+    expect(labels).toContain('Historical error range (experimental)');
     expect(labels).toContain('Range midpoint — experimental');
+    expect(labels.join(' ')).not.toMatch(/calibrated|empirical band/i);
     expect(lastChartProps.data.labels.length).toBe(22 + 7);
-    // Honesty: estimate is dashed, detached from history, inside a marked region.
-    const estimate = lastChartProps.data.datasets.find((ds) => ds.label === 'Range midpoint — experimental');
-    expect(estimate.borderDash).toEqual([6, 4]);
-    expect(estimate.data.slice(0, 22).every((v) => v == null)).toBe(true);
+    // Midpoint and range band are smoothly anchored at index N-1 (21) with last close (399).
+    const upperBand = lastChartProps.data.datasets.find((ds) => ds.role === 'band-upper');
+    const lowerBand = lastChartProps.data.datasets.find((ds) => ds.role === 'band-lower');
+    const midpoint = lastChartProps.data.datasets.find((ds) => ds.role === 'midpoint');
+    expect(upperBand.fill).toBe('+1');
+    expect(upperBand.data[21]).toBe(399);
+    expect(lowerBand.data[21]).toBe(399);
+    expect(midpoint.borderDash).toEqual([6, 4]);
+    expect(midpoint.data.slice(0, 21).every((v) => v == null)).toBe(true);
+    expect(midpoint.data[21]).toBe(399);
     expect(lastChartProps.data.forecastSplitIndex).toBe(21);
     expect(lastChartProps.plugins.map((p) => p.id)).toContain('t212ForecastRegion');
+
+    // Tooltip filter excludes band datasets and N-1 anchored midpoint duplicate
+    const { filter, callbacks } = lastChartProps.options.plugins.tooltip;
+    expect(filter({ dataset: upperBand, dataIndex: 22 })).toBe(false);
+    expect(filter({ dataset: lowerBand, dataIndex: 22 })).toBe(false);
+    expect(filter({ dataset: midpoint, dataIndex: 21 })).toBe(false);
+    expect(filter({ dataset: midpoint, dataIndex: 22 })).toBe(true);
+
+    // Midpoint tooltip computes % relative to latest close (399) and afterLabel renders Range
+    const midLabel = callbacks.label({ dataset: midpoint, parsed: { y: 401 }, dataIndex: 22 });
+    expect(midLabel).toContain('$401.00');
+    expect(midLabel).toContain('+0.50%');
+    expect(callbacks.afterLabel({ dataset: midpoint, dataIndex: 22 })).toBe(' Range: $397.00 – $405.00');
+    expect(callbacks.afterLabel({ dataset: lastChartProps.data.datasets[0], dataIndex: 21 })).toBe('');
   });
 
-  it('wheel zoom reveals a reset control and double-click clears it', () => {
+  it('gates wheel zoom behind Ctrl/Cmd and supports compact zoom buttons and double-click reset', () => {
     usePriceHistory.mockReturnValue({ history: historyFixture(300, true), loading: false, error: '', retry: vi.fn() });
     const { container } = render(<PriceChart ticker="MSFT" currencySymbol="$" />);
     fireEvent.click(screen.getByRole('button', { name: '1M' }));
     expect(screen.queryByRole('button', { name: 'Reset' })).toBeNull();
+    // Plain wheel does NOT hijack scrolling or zoom
     fireEvent.wheel(container.querySelector('.t212-chart-wrap'), { clientX: 200, deltaY: -100 });
+    expect(screen.queryByRole('button', { name: 'Reset' })).toBeNull();
+    // Ctrl + wheel DOES zoom and reveals Reset
+    fireEvent.wheel(container.querySelector('.t212-chart-wrap'), { clientX: 200, deltaY: -100, ctrlKey: true });
     expect(screen.getByRole('button', { name: 'Reset' })).toBeInTheDocument();
+    expect(lastChartProps.options.animation).toBe(false);
     fireEvent.doubleClick(container.querySelector('.t212-chart-wrap'));
+    expect(screen.queryByRole('button', { name: 'Reset' })).toBeNull();
+    // Compact + / - zoom buttons work without mouse wheel
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    expect(screen.getByRole('button', { name: 'Reset' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom out' }));
     expect(screen.queryByRole('button', { name: 'Reset' })).toBeNull();
   });
   it('shows loading and error states', () => {
@@ -156,13 +190,14 @@ describe('PriceChart', () => {
     expect(labels).toContain('Range midpoint — experimental');
   });
 
-  it('removes automatic uncertainty and volatility bands from this price view by default', () => {
+  it('renders subtle experimental error range band without claiming calibrated or volatility cone labels', () => {
     usePriceHistory.mockReturnValue({ history: historyFixture(300, true), loading: false, error: '', meta: null, retry: vi.fn() });
     render(<PriceChart ticker="MSFT" currencySymbol="$" forecast={forecastFixture} />);
     const labels = lastChartProps.data.datasets.map((ds) => ds.label);
+    expect(labels).toContain('Historical error range (experimental)');
     expect(labels).not.toContain('Expected volatility range (upper)');
     expect(labels).not.toContain('Expected volatility range (lower)');
-    expect(labels).not.toContain('Estimate range (upper)');
+    expect(labels.join(' ')).not.toMatch(/calibrated|empirical band/i);
   });
 
   it('refuses manufactured history instead of charting it', () => {
@@ -222,12 +257,32 @@ describe('PriceChart', () => {
 });
 
 
-it('offers keyboard date inspection with full year and accessible numerical data', () => {
+it('offers an opt-in Table toolbar toggle and auto-opens the table on chart engine error', () => {
   usePriceHistory.mockReturnValue({ history: historyFixture(300, false), loading: false, error: '', retry: vi.fn() });
-  render(<PriceChart ticker="MSFT" />);
-  const slider = screen.getByRole('slider', { name: 'Inspect chart date' });
-  fireEvent.keyDown(slider, { key: 'End' });
-  expect(screen.getByRole('status')).toHaveTextContent('2024-06-01');
-  expect(screen.getByText('Price data table')).toBeInTheDocument();
+  render(<PriceChart ticker="MSFT" forecast={forecastFixture} />);
+  expect(screen.queryByRole('slider', { name: 'Inspect chart date' })).toBeNull();
+  const tableBtn = screen.getByRole('button', { name: 'Table' });
+  expect(tableBtn).toHaveAttribute('aria-expanded', 'false');
+  expect(screen.queryByRole('table')).toBeNull();
+
+  // Clicking Table opens the accessible table
+  fireEvent.click(tableBtn);
+  expect(tableBtn).toHaveAttribute('aria-expanded', 'true');
+  expect(screen.getByRole('table')).toBeInTheDocument();
+  expect(screen.getByRole('rowheader', { name: '2024-06-01' })).toBeInTheDocument();
+  expect(screen.getByRole('rowheader', { name: '2024-06-11' })).toBeInTheDocument();
+
+  // Closing and triggering LazyLineChart chunk error auto-opens the table
+  fireEvent.click(tableBtn);
+  expect(screen.queryByRole('table')).toBeNull();
+  act(() => {
+    lastChartProps.onErrorChange(true);
+  });
+  expect(screen.getByRole('table')).toBeInTheDocument();
+
+  // X-axis tick callback uses CategoryScale getLabelForValue and formats compactly
+  const tickCallback = lastChartProps.options.scales.x.ticks.callback;
+  const formatted = tickCallback.call({ getLabelForValue: (v) => lastChartProps.data.labels[v] }, 0);
+  expect(formatted).toMatch(/^\d{2}-\d{2}$/);
   expect(lastChartProps['aria-label']).toContain('MSFT historical closes');
 });

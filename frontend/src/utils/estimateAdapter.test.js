@@ -38,6 +38,9 @@ describe('getSharedEstimatePresentation', () => {
     expect(res.isAvailable).toBe(true);
     expect(res.isMismatch).toBe(false);
     expect(res.series).toHaveLength(7);
+    expect(res.lowerSeries).toEqual(baseForecast.lower_prices);
+    expect(res.upperSeries).toEqual(baseForecast.upper_prices);
+    expect(res.rangeLabel).toBe('Historical error range (experimental)');
     expect(res.series[0]).toBeCloseTo((482.45 + 495.1) / 2, 4);
     expect(res.series[6]).toBeCloseTo((468.65 + 492.41) / 2, 4);
     expect(res.finalPrice).toBe(res.series[6]);
@@ -61,6 +64,8 @@ describe('getSharedEstimatePresentation', () => {
     expect(res.isAvailable).toBe(false);
     expect(res.reason).toBe('invalid_horizon');
     expect(res.series).toEqual([]);
+    expect(res.lowerSeries).toEqual([]);
+    expect(res.upperSeries).toEqual([]);
   });
 
   it('detects ticker mismatch between forecast and history', () => {

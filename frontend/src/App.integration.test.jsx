@@ -5,6 +5,7 @@ import userEvent from '@testing-library/user-event';
 import App from './App';
 import { clearPriceHistoryCache } from './api/priceHistoryClient';
 import { clearVolatilityOutlookCache } from './hooks/useVolatilityOutlook';
+import { clearForecastLedgerCache } from './api/forecastLedgerClient';
 
 vi.mock('./components/LazyLineChart', () => ({
   default: React.forwardRef(({ data }, ref) => (
@@ -96,6 +97,17 @@ function installFetch() {
       const match = urlStr.match(/horizon=(\d+)/);
       return Promise.resolve({ ok: true, json: () => Promise.resolve(volatilityBody(Number(match?.[1] || 5), sym, basePrice)) });
     }
+    if (urlStr.includes('/api/v1/volatility/ledger')) {
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({
+          ticker: sym,
+          entries: [],
+          live_track_record: { total_forecasts: 0 },
+          replay_track_record: { total_forecasts: 0 },
+        }),
+      });
+    }
     if (urlStr.includes('/api/v1/news')) {
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'available', ticker: sym, items: [] }) });
     }
@@ -152,6 +164,7 @@ describe('simplified forecast app', () => {
     installFetch();
     clearPriceHistoryCache();
     clearVolatilityOutlookCache();
+    clearForecastLedgerCache();
   });
 
   it('wakes the backend automatically from the single frontend page without fetching stock data on first visit', async () => {
@@ -652,19 +665,28 @@ describe('simplified forecast app', () => {
     await screen.findByRole('heading', { name: 'Volatility Outlook' });
     await screen.findByText(/Range midpoint — experimental:/i);
 
-    const dataCalls = () => global.fetch.mock.calls.filter(
-      ([url]) => /\/api\/v1\/(history|forecast|volatility|news)/.test(String(url)),
+    const coreDataCalls = () => global.fetch.mock.calls.filter(
+      ([url]) => /\/api\/v1\/(history|forecast|volatility\/forecast|news)/.test(String(url)),
     );
+    const ledgerCalls = () => global.fetch.mock.calls.filter(([url]) => String(url).includes('/api/v1/volatility/ledger'));
     const historyCalls = global.fetch.mock.calls.filter(([url]) => String(url).includes('/api/v1/history'));
     const batchCalls = global.fetch.mock.calls.filter(([url]) => String(url).includes('/api/v1/volatility/forecast/batch'));
     expect(historyCalls).toHaveLength(1);
     expect(batchCalls).toHaveLength(1);
+    // Ledger is not eagerly fetched on Overview
+    expect(ledgerCalls()).toHaveLength(0);
 
-    const dataCountBeforeTabSwitches = dataCalls().length;
+    const dataCountBeforeTabSwitches = coreDataCalls().length;
     await user.click(screen.getByRole('tab', { name: /news/i }));
     await user.click(screen.getByRole('tab', { name: /performance/i }));
+    await waitFor(() => expect(ledgerCalls()).toHaveLength(1));
+    // Empty ledger remains hidden in the DOM
+    expect(document.getElementById('forecastLedgerSection')).toBeNull();
     await user.click(screen.getByRole('tab', { name: /overview/i }));
-    expect(dataCalls()).toHaveLength(dataCountBeforeTabSwitches);
+    await user.click(screen.getByRole('tab', { name: /performance/i }));
+    await user.click(screen.getByRole('tab', { name: /overview/i }));
+    expect(coreDataCalls()).toHaveLength(dataCountBeforeTabSwitches);
+    expect(ledgerCalls()).toHaveLength(1);
     expect(document.getElementById('panel-overview')).not.toHaveAttribute('hidden');
     expect(document.getElementById('panel-news')).toHaveAttribute('hidden');
     expect(document.getElementById('panel-performance')).toHaveAttribute('hidden');
@@ -747,7 +769,18 @@ describe('simplified forecast app', () => {
     const baseFetch = global.fetch;
     global.fetch = vi.fn((url, init) => {
       const urlStr = String(url);
-      if (urlStr.includes('/api/v1/news')) {
+      if (urlStr.includes('/api/v1/volatility/ledger')) {
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({
+          ticker: sym,
+          entries: [],
+          live_track_record: { total_forecasts: 0 },
+          replay_track_record: { total_forecasts: 0 },
+        }),
+      });
+    }
+    if (urlStr.includes('/api/v1/news')) {
         const sym = (urlStr.match(/ticker=([^&]+)/)?.[1] || 'MSFT').toUpperCase();
         return Promise.resolve({
           ok: true,

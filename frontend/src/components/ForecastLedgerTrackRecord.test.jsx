@@ -97,16 +97,14 @@ describe('ForecastLedgerTrackRecord', () => {
     vi.restoreAllMocks();
   });
 
-  it('renders track record metrics and forecast entries without verified wording', async () => {
-    render(<ForecastLedgerTrackRecord ticker="AAPL" horizon={5} defaultOpen={true} />);
+  it('renders track record metrics and forecast entries without verified wording once loaded', async () => {
+    const { container } = render(<ForecastLedgerTrackRecord ticker="AAPL" horizon={5} defaultOpen={true} enabled={true} />);
 
-    expect(screen.getByText(/Loading past forecasts/i)).toBeInTheDocument();
+    // Hidden (null) while loading to prevent empty-ledger flashes
+    expect(container.firstChild).toBeNull();
+
+    expect(await screen.findByText('Recorded volatility forecasts')).toBeInTheDocument();
     expect(screen.queryByText(/verified/i)).not.toBeInTheDocument();
-
-    await waitFor(() => {
-      expect(screen.queryByText(/Loading past forecasts/i)).not.toBeInTheDocument();
-    });
-    expect(screen.getByText('Recorded volatility forecasts')).toBeInTheDocument();
     expect(screen.getByText('AAPL 5 trading sessions')).toBeInTheDocument();
     expect(screen.getAllByText('5 trading sessions').length).toBeGreaterThan(0);
 
@@ -129,19 +127,45 @@ describe('ForecastLedgerTrackRecord', () => {
     expect(screen.getByText('0.7206')).toBeInTheDocument();
   });
 
-  it('shows single sentence when there are no ledger records', async () => {
+  it('returns null without fetching when enabled is false, and latches per ticker once enabled', async () => {
+    const { container, rerender } = render(<ForecastLedgerTrackRecord ticker="AAPL" horizon={5} enabled={false} />);
+    expect(container.firstChild).toBeNull();
+    expect(global.fetch).not.toHaveBeenCalled();
+
+    // Enabling fetches once and renders card
+    rerender(<ForecastLedgerTrackRecord ticker="AAPL" horizon={5} enabled={true} />);
+    expect(await screen.findByText('Recorded volatility forecasts')).toBeInTheDocument();
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+
+    // Disabling keeps same ticker latched (no refetch)
+    rerender(<ForecastLedgerTrackRecord ticker="AAPL" horizon={5} enabled={false} />);
+    expect(screen.getByText('Recorded volatility forecasts')).toBeInTheDocument();
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+
+    // Switching ticker while disabled resets latch (no eager fetch)
+    rerender(<ForecastLedgerTrackRecord ticker="MSFT" horizon={5} enabled={false} />);
+    expect(container.firstChild).toBeNull();
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns null when there are no ledger records or when the request errors', async () => {
     vi.stubGlobal('fetch', vi.fn(() =>
       Promise.resolve({
         ok: true,
-        json: () => Promise.resolve({ entries: [], live_track_record: {}, replay_track_record: {} }),
+        json: () => Promise.resolve({ entries: [], live_track_record: { total_forecasts: 0 }, replay_track_record: { total_forecasts: 0 } }),
       })
     ));
 
-    render(<ForecastLedgerTrackRecord ticker="AAPL" horizon={5} defaultOpen={true} />);
-    await waitFor(() => {
-      expect(screen.getByText('No past recorded forecasts for this ticker yet.')).toBeInTheDocument();
-    });
-    expect(screen.queryByRole('table')).not.toBeInTheDocument();
+    const { container, unmount } = render(<ForecastLedgerTrackRecord ticker="AAPL" horizon={5} defaultOpen={true} enabled={true} />);
+    await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(1));
+    expect(container.firstChild).toBeNull();
+    unmount();
+
+    clearForecastLedgerCache();
+    vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('Ledger down'))));
+    const errRender = render(<ForecastLedgerTrackRecord ticker="AAPL" horizon={5} defaultOpen={true} enabled={true} />);
+    await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(1));
+    expect(errRender.container.firstChild).toBeNull();
   });
 
   it('renders null when ticker is omitted', () => {
@@ -158,14 +182,14 @@ describe('ForecastLedgerTrackRecord', () => {
         return new Promise((resolve) => { finishOld = resolve; });
       })
       .mockResolvedValueOnce({ ok: true, json: async () => ({ entries: [] }) }));
-    const { rerender } = render(<ForecastLedgerTrackRecord ticker="AAPL" horizon={5} defaultOpen />);
-    rerender(<ForecastLedgerTrackRecord ticker="MSFT" horizon={20} defaultOpen />);
+    const { container, rerender } = render(<ForecastLedgerTrackRecord ticker="AAPL" horizon={5} defaultOpen enabled />);
+    rerender(<ForecastLedgerTrackRecord ticker="MSFT" horizon={20} defaultOpen enabled />);
     expect(oldSignal.aborted).toBe(true);
-    await screen.findByText('No past recorded forecasts for this ticker yet.');
+    await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(2));
     await act(async () => {
       finishOld({ ok: true, json: async () => mockLedgerResponse });
     });
-    expect(screen.getByText('MSFT 20 trading sessions')).toBeInTheDocument();
+    expect(container.firstChild).toBeNull();
     expect(screen.queryByRole('table')).not.toBeInTheDocument();
   });
 });
