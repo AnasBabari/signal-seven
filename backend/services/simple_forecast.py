@@ -33,6 +33,7 @@ from sklearn.preprocessing import RobustScaler
 from calendars import future_trading_dates
 from config import settings
 from market_data.quote_units import LSE_QUOTE_UNIT_OVERRIDES
+from market_data.universe_catalog import get_catalog_ticker_meta
 from services import forecast_artifacts
 from services.training_budget import training_slot
 
@@ -288,6 +289,18 @@ def get_ticker_meta(symbol: str) -> dict[str, str]:
             meta["currency"] = override["currency"]
             meta["currency_symbol"] = override["currency_symbol"]
         return meta
+    try:
+        catalog_meta = get_catalog_ticker_meta(sym)
+    except FileNotFoundError:
+        catalog_meta = None
+    if catalog_meta is not None:
+        return {
+            "name": str(catalog_meta["name"]),
+            "exchange_mic": str(catalog_meta["exchange_mic"]),
+            "exchange_name": str(catalog_meta["exchange_name"]),
+            "currency": str(catalog_meta["currency"]),
+            "currency_symbol": str(catalog_meta["currency_symbol"]),
+        }
     if override is not None:
         return dict(override)
     if sym.endswith(".L"):
