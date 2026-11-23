@@ -261,7 +261,7 @@ export async function fetchVolatilityForecast(
   symbol,
   days,
   signal,
-  { baseUrl = getApiBase(), fetchImpl = (...args) => globalThis.fetch(...args), model = null, timeoutMs = 20_000 } = {},
+  { baseUrl = getApiBase(), fetchImpl = (...args) => globalThis.fetch(...args), model = null, timeoutMs = 20_000, cache } = {},
 ) {
   const requestTicker = String(symbol).trim().toUpperCase();
   const horizon = Number(days);
@@ -270,10 +270,12 @@ export async function fetchVolatilityForecast(
   }
   const modelQuery = model ? `&model=${encodeURIComponent(String(model))}` : '';
   let body;
-  try { body = await requestJson(
-    `/api/v1/volatility/forecast?ticker=${encodeURIComponent(requestTicker)}&horizon=${horizon}${modelQuery}`,
-    { signal, timeoutMs, baseUrl, fetchImpl },
-  ); } catch (error) {
+  try {
+    body = await requestJson(
+      `/api/v1/volatility/forecast?ticker=${encodeURIComponent(requestTicker)}&horizon=${horizon}${modelQuery}`,
+      { signal, timeoutMs, cache, baseUrl, fetchImpl },
+    );
+  } catch (error) {
     if (error.status) {
       const details = apiErrorBody(error.payload);
       throw new VolatilityApiError(details.reason, { code: details.code, httpStatus: error.status });
@@ -281,4 +283,81 @@ export async function fetchVolatilityForecast(
     throw error;
   }
   return mapVolatilityResponse(body, requestTicker, horizon);
+}
+
+export async function fetchVolatilityForecastBatch(
+  symbol,
+  horizons = [5, 10, 20],
+  signal,
+  { baseUrl = getApiBase(), fetchImpl = (...args) => globalThis.fetch(...args), model = 'auto', timeoutMs = 20_000, cache } = {},
+) {
+  const requestTicker = String(symbol || '').trim().toUpperCase();
+  const normalizedHorizons = [...new Set(
+    (Array.isArray(horizons) ? horizons : [])
+      .map((value) => Number(value))
+      .filter((value) => VOLATILITY_HORIZONS.includes(value)),
+  )];
+  if (!requestTicker || normalizedHorizons.length === 0) {
+    throw new Error('Volatility batch forecast requires a supported ticker and at least one horizon.');
+  }
+  const modelQuery = model ? `&model=${encodeURIComponent(String(model))}` : '';
+  let body;
+  try {
+    body = await requestJson(
+      `/api/v1/volatility/forecast/batch?ticker=${encodeURIComponent(requestTicker)}&horizons=${normalizedHorizons.join(',')}${modelQuery}`,
+      { signal, timeoutMs, cache, baseUrl, fetchImpl },
+    );
+  } catch (error) {
+    if (error.status) {
+      const details = apiErrorBody(error.payload);
+      throw new VolatilityApiError(details.reason, { code: details.code, httpStatus: error.status });
+    }
+    throw error;
+  }
+
+  if (
+    !body
+    || body.ticker !== requestTicker
+    || !body.forecasts
+    || typeof body.forecasts !== 'object'
+    || Array.isArray(body.forecasts)
+  ) {
+    throw new VolatilityApiError('Volatility batch response is malformed.', { code: 'INVALID_BATCH_RESPONSE' });
+  }
+
+  const byHorizon = {};
+  const errors = {};
+  for (const horizon of normalizedHorizons) {
+    const key = String(horizon);
+    const rawForecast = body.forecasts[key];
+    if (rawForecast) {
+      try {
+        byHorizon[horizon] = mapVolatilityResponse(rawForecast, requestTicker, horizon);
+      } catch (validationError) {
+        errors[horizon] = {
+          code: 'INVALID_HORIZON_RESPONSE',
+          message: validationError?.message || 'Volatility horizon response failed validation.',
+        };
+      }
+    } else if (body.errors && body.errors[key]) {
+      const rawError = body.errors[key];
+      errors[horizon] = typeof rawError === 'string'
+        ? { code: 'HORIZON_UNAVAILABLE', message: rawError }
+        : {
+          code: rawError.code || 'HORIZON_UNAVAILABLE',
+          message: rawError.message || 'Volatility horizon unavailable.',
+        };
+    } else {
+      errors[horizon] = { code: 'HORIZON_MISSING', message: 'Volatility horizon missing from batch response.' };
+    }
+  }
+
+  return {
+    ticker: requestTicker,
+    asOf: body.as_of || null,
+    requestedModel: body.requested_model || model,
+    postCloseGraceUsed: Boolean(body.post_close_grace_used),
+    byHorizon,
+    errors,
+  };
 }

@@ -73,16 +73,19 @@ it('distinguishes deadline from parent cancellation', async () => {
 });
 
 
-it('refreshes expired data and bypasses fresh data on explicit retry', async () => {
+it('refreshes expired data and bypasses fresh data on explicit retry with no-cache', async () => {
   vi.useFakeTimers();
-  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => payload }));
+  const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => payload });
+  vi.stubGlobal('fetch', fetchMock);
   clearPriceHistoryCache();
   await fetchPriceHistory('MSFT');
   await fetchPriceHistory('MSFT');
-  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(fetchMock.mock.calls[0][1]).not.toHaveProperty('cache', 'no-cache');
   await vi.advanceTimersByTimeAsync(60_001);
   await fetchPriceHistory('MSFT');
   await fetchPriceHistory('MSFT', { forceRefresh: true });
-  expect(fetch).toHaveBeenCalledTimes(3);
+  expect(fetchMock).toHaveBeenCalledTimes(3);
+  expect(fetchMock.mock.calls[2][1]).toHaveProperty('cache', 'no-cache');
   vi.useRealTimers();
 });

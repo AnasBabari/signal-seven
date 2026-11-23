@@ -154,9 +154,22 @@ export default function PriceChart({
   onHistorySettled = null,
   onRetryForecast = null,
   refreshToken = 0,
+  marketHistory,
+  historyLoading,
+  historyError,
+  onRetryHistory = null,
 }) {
   const isDark = useAppTheme();
-  const { history, loading, error, meta, retry } = usePriceHistory(ticker, refreshToken);
+  const isControlledHistory = marketHistory !== undefined
+    || historyLoading !== undefined
+    || historyError !== undefined
+    || onRetryHistory !== null;
+  const hookHistory = usePriceHistory(isControlledHistory ? null : ticker, refreshToken);
+  const history = isControlledHistory ? (marketHistory ?? null) : hookHistory.history;
+  const loading = isControlledHistory ? Boolean(historyLoading) : hookHistory.loading;
+  const error = isControlledHistory ? (historyError || '') : hookHistory.error;
+  const meta = isControlledHistory ? (marketHistory?.meta ?? null) : hookHistory.meta;
+  const retry = isControlledHistory ? (onRetryHistory || (() => {})) : hookHistory.retry;
   const descriptionId = React.useId();
   const [tableOpen, setTableOpen] = useState(false);
   const [inspectIndex, setInspectIndex] = useState(0);
@@ -213,7 +226,7 @@ export default function PriceChart({
 
   useEffect(() => {
     if (!onHistorySettled) return;
-    const key = String(ticker || '').toUpperCase();
+    const key = `${String(ticker || '').toUpperCase()}:${refreshToken}`;
     if (effectiveHistory && reportedRef.current !== `${key}:ok`) {
       reportedRef.current = `${key}:ok`;
       onHistorySettled({
@@ -227,7 +240,7 @@ export default function PriceChart({
       reportedRef.current = `${key}:error`;
       onHistorySettled({ ok: false, degraded: false, fetchMs: null, fromCache: false, marketDataCache: null });
     }
-  }, [effectiveHistory, showError, history, fallbackHistory, meta, ticker, onHistorySettled]);
+  }, [effectiveHistory, showError, history, fallbackHistory, meta, ticker, refreshToken, onHistorySettled]);
 
   const hasIntraday = Array.isArray(effectiveHistory?.intraday) && effectiveHistory.intraday.length >= 5;
   const dailyCount = Array.isArray(effectiveHistory?.daily) ? effectiveHistory.daily.length : 0;

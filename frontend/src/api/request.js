@@ -18,9 +18,13 @@ export async function withDeadline(operation, { signal, timeoutMs = 20_000 } = {
   finally { clearTimeout(timer); signal?.removeEventListener('abort', cancel); }
 }
 
-export async function requestJson(path, { signal, timeoutMs, baseUrl = getApiBase(), fetchImpl = (...args) => globalThis.fetch(...args) } = {}) {
+export async function requestJson(
+  path,
+  { signal, timeoutMs, cache, baseUrl = getApiBase(), fetchImpl = (...args) => globalThis.fetch(...args) } = {},
+) {
   return withDeadline(async (requestSignal) => {
-    const response = await fetchImpl(`${baseUrl.replace(/\/$/, '')}${path}`, { signal: requestSignal, cache: 'no-cache' });
+    const fetchOptions = cache !== undefined ? { signal: requestSignal, cache } : { signal: requestSignal };
+    const response = await fetchImpl(`${baseUrl.replace(/\/$/, '')}${path}`, fetchOptions);
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
       const detail = typeof payload.detail === 'string' ? payload.detail : payload.message;

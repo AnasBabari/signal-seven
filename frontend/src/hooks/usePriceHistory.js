@@ -12,9 +12,14 @@ export function usePriceHistory(ticker, refreshToken = 0) {
   const [meta, setMeta] = useState(null);
   const [retryTick, setRetryTick] = useState(0);
   const seqRef = useRef(0);
+  const prevRefreshRef = useRef(refreshToken);
+  const prevRetryTickRef = useRef(retryTick);
 
   useEffect(() => {
     const symbol = String(ticker || '').trim().toUpperCase();
+    const isExplicitRefresh = prevRefreshRef.current !== refreshToken || prevRetryTickRef.current !== retryTick;
+    prevRefreshRef.current = refreshToken;
+    prevRetryTickRef.current = retryTick;
     if (!symbol) {
       setHistory(null);
       setLoading(false);
@@ -29,7 +34,7 @@ export function usePriceHistory(ticker, refreshToken = 0) {
     setLoading(true);
     setError('');
     setMeta(null);
-    fetchPriceHistory(symbol, { signal: controller.signal, forceRefresh: retryTick > 0 || refreshToken > 0 })
+    fetchPriceHistory(symbol, { signal: controller.signal, forceRefresh: isExplicitRefresh })
       .then((result) => {
         if (seqRef.current === id) {
           setHistory(result);

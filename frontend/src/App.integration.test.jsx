@@ -1,9 +1,10 @@
 import React from 'react';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import App from './App';
 import { clearPriceHistoryCache } from './api/priceHistoryClient';
+import { clearVolatilityOutlookCache } from './hooks/useVolatilityOutlook';
 
 vi.mock('./components/LazyLineChart', () => ({
   default: React.forwardRef(({ data }, ref) => (
@@ -74,6 +75,23 @@ function installFetch() {
         }),
       });
     }
+    if (urlStr.includes('/api/v1/volatility/forecast/batch')) {
+      const horizonsMatch = urlStr.match(/horizons=([^&]+)/);
+      const horizons = (horizonsMatch ? decodeURIComponent(horizonsMatch[1]).split(',') : ['5', '10', '20']).map(Number);
+      const forecasts = Object.fromEntries(horizons.map((h) => [String(h), volatilityBody(h, sym, basePrice)]));
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({
+          ticker: sym,
+          as_of: '2026-09-03',
+          requested_model: 'auto',
+          horizons,
+          forecasts,
+          errors: {},
+          post_close_grace_used: false,
+        }),
+      });
+    }
     if (urlStr.includes('/api/v1/volatility/forecast')) {
       const match = urlStr.match(/horizon=(\d+)/);
       return Promise.resolve({ ok: true, json: () => Promise.resolve(volatilityBody(Number(match?.[1] || 5), sym, basePrice)) });
@@ -133,6 +151,7 @@ describe('simplified forecast app', () => {
   beforeEach(() => {
     installFetch();
     clearPriceHistoryCache();
+    clearVolatilityOutlookCache();
   });
 
   it('wakes the backend automatically from the single frontend page without fetching stock data on first visit', async () => {
@@ -620,5 +639,145 @@ describe('simplified forecast app', () => {
 
     // Modal dialog is closed
     expect(screen.queryByRole('dialog', { name: /expanded price chart/i })).not.toBeInTheDocument();
+  });
+
+  it('fetches /api/v1/history once per ticker, uses batch volatility, and triggers zero refetches on tab switches', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText('Forecast service reachable');
+    const input = screen.getByLabelText(/stock ticker/i);
+    await user.type(input, 'MSFT');
+    await user.click(screen.getByRole('button', { name: /view outlook/i }));
+
+    await screen.findByRole('heading', { name: 'Volatility Outlook' });
+    await screen.findByText(/Range midpoint — experimental:/i);
+
+    const dataCalls = () => global.fetch.mock.calls.filter(
+      ([url]) => /\/api\/v1\/(history|forecast|volatility|news)/.test(String(url)),
+    );
+    const historyCalls = global.fetch.mock.calls.filter(([url]) => String(url).includes('/api/v1/history'));
+    const batchCalls = global.fetch.mock.calls.filter(([url]) => String(url).includes('/api/v1/volatility/forecast/batch'));
+    expect(historyCalls).toHaveLength(1);
+    expect(batchCalls).toHaveLength(1);
+
+    const dataCountBeforeTabSwitches = dataCalls().length;
+    await user.click(screen.getByRole('tab', { name: /news/i }));
+    await user.click(screen.getByRole('tab', { name: /performance/i }));
+    await user.click(screen.getByRole('tab', { name: /overview/i }));
+    expect(dataCalls()).toHaveLength(dataCountBeforeTabSwitches);
+    expect(document.getElementById('panel-overview')).not.toHaveAttribute('hidden');
+    expect(document.getElementById('panel-news')).toHaveAttribute('hidden');
+    expect(document.getElementById('panel-performance')).toHaveAttribute('hidden');
+  });
+
+  it('shows Retry connection button on offline ServiceBadge and recovers on click', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let healthHealthy = false;
+    global.fetch = vi.fn((url) => {
+      if (String(url).endsWith('/health')) {
+        if (!healthHealthy) return Promise.reject(new Error('Service offline'));
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'ok' }) });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    });
+
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    render(<App />);
+    for (let i = 0; i < 12; i += 1) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_500);
+      });
+    }
+    expect(await screen.findByText('Forecast service unavailable')).toBeInTheDocument();
+    const retryBtn = screen.getByRole('button', { name: /retry connection/i });
+    expect(retryBtn).toBeInTheDocument();
+
+    healthHealthy = true;
+    await user.click(retryBtn);
+    expect(await screen.findByText('Forecast service reachable')).toBeInTheDocument();
+    vi.useRealTimers();
+  });
+
+  it('consolidates dual 503 history and forecast failures into a single unified error card', async () => {
+    global.fetch = vi.fn((url) => {
+      if (String(url).endsWith('/health')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'ok' }) });
+      }
+      if (String(url).includes('/api/v1/history') || String(url).includes('/api/v1/forecast')) {
+        return Promise.resolve({
+          ok: false,
+          status: 503,
+          json: () => Promise.resolve({ detail: 'Upstream provider down' }),
+        });
+      }
+      if (String(url).includes('/api/v1/news')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'available', ticker: 'MSFT', items: [] }) });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    });
+
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText('Forecast service reachable');
+    await user.type(screen.getByLabelText(/stock ticker/i), 'MSFT');
+    await user.click(screen.getByRole('button', { name: /view outlook/i }));
+
+    await waitFor(() => {
+      const alerts = screen.getAllByRole('alert');
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0]).toHaveTextContent('Upstream provider down');
+    });
+
+    // Explicit Retry sends cache: 'no-cache'
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => {
+      const retryHistoryCalls = global.fetch.mock.calls.filter(([url]) => String(url).includes('/api/v1/history'));
+      expect(retryHistoryCalls.length).toBeGreaterThanOrEqual(2);
+      expect(retryHistoryCalls.at(-1)[1]).toHaveProperty('cache', 'no-cache');
+    });
+  });
+
+  it('resets NewsPanel showAll state when switching tickers', async () => {
+    const sixItems = Array.from({ length: 6 }, (_, index) => ({
+      id: `item-${index + 1}`,
+      title: `Headline ${index + 1}`,
+      source: 'Reuters',
+      published_at: `2026-09-03T1${index}:00:00Z`,
+    }));
+    const baseFetch = global.fetch;
+    global.fetch = vi.fn((url, init) => {
+      const urlStr = String(url);
+      if (urlStr.includes('/api/v1/news')) {
+        const sym = (urlStr.match(/ticker=([^&]+)/)?.[1] || 'MSFT').toUpperCase();
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            status: 'available',
+            ticker: sym,
+            items: sixItems.map((item) => ({ ...item, title: `${sym} ${item.title}` })),
+          }),
+        });
+      }
+      return baseFetch(url, init);
+    });
+
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText('Forecast service reachable');
+    const input = screen.getByLabelText(/stock ticker/i);
+    await user.type(input, 'MSFT');
+    await user.click(screen.getByRole('button', { name: /view outlook/i }));
+    await screen.findByText(/Range midpoint — experimental:/i);
+
+    await user.click(screen.getByRole('tab', { name: /news/i }));
+    await user.click(await screen.findByRole('button', { name: /show more stories/i }));
+    expect(screen.getByText('MSFT Headline 6')).toBeInTheDocument();
+
+    await user.clear(input);
+    await user.type(input, 'NVDA');
+    await user.click(screen.getByRole('button', { name: /view outlook/i }));
+    expect(await screen.findByText('NVDA Headline 1')).toBeInTheDocument();
+    expect(screen.queryByText('NVDA Headline 6')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /show more stories \(1 more\)/i })).toBeInTheDocument();
   });
 });

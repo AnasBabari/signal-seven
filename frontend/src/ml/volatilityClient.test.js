@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   fetchVolatilityForecast,
+  fetchVolatilityForecastBatch,
   mapVolatilityResponse,
   validateVolatilityResponse,
   VolatilityApiError,
@@ -194,5 +195,51 @@ describe('volatility client contract', () => {
     const invalid = body();
     invalid.forecast.future_dates = ['2026-08-21', '2026-08-23', '2026-08-22', '2026-08-24', '2026-08-25'];
     expect(() => validateVolatilityResponse(invalid, 'MSFT', 5)).toThrow(/chronological/);
+  });
+
+  it('parses the M3 batch volatility response including partial per-horizon errors', async () => {
+    const h5 = body();
+    const h20Dates = Array.from({ length: 20 }, (_, i) => new Date(Date.UTC(2026, 7, 21 + i)).toISOString().slice(0, 10));
+    const h20 = body({
+      horizon: 20,
+      forecast: {
+        ...body().forecast,
+        future_dates: h20Dates,
+        price_quantiles: Object.fromEntries(
+          ['p05', 'p10', 'p25', 'p50', 'p75', 'p90', 'p95'].map((k) => [k, Array(20).fill(100)]),
+        ),
+      },
+    });
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        ticker: 'MSFT',
+        as_of: '2026-08-20',
+        requested_model: 'auto',
+        horizons: [5, 10, 20],
+        forecasts: { '5': h5, '20': h20 },
+        errors: { '10': { code: 'HORIZON_UNAVAILABLE', message: '10d unavailable' } },
+        post_close_grace_used: false,
+      }),
+    }));
+    const batch = await fetchVolatilityForecastBatch('MSFT', [5, 10, 20], undefined, {
+      baseUrl: 'https://api.test',
+      fetchImpl,
+      model: 'auto',
+      cache: 'no-cache',
+    });
+    expect(fetchImpl.mock.calls[0][0]).toBe('https://api.test/api/v1/volatility/forecast/batch?ticker=MSFT&horizons=5,10,20&model=auto');
+    expect(fetchImpl.mock.calls[0][1]).toHaveProperty('cache', 'no-cache');
+    expect(batch.byHorizon[5].forecast_days).toBe(5);
+    expect(batch.byHorizon[20].forecast_days).toBe(20);
+    expect(batch.byHorizon[10]).toBeUndefined();
+    expect(batch.errors[10]).toEqual({ code: 'HORIZON_UNAVAILABLE', message: '10d unavailable' });
+  });
+
+  it('rejects a non-batch payload returned from the batch endpoint', async () => {
+    const fetchImpl = vi.fn(async () => ({ ok: true, json: async () => body() }));
+    await expect(
+      fetchVolatilityForecastBatch('MSFT', [5, 10, 20], undefined, { baseUrl: 'https://api.test', fetchImpl }),
+    ).rejects.toMatchObject({ name: 'VolatilityApiError', code: 'INVALID_BATCH_RESPONSE' });
   });
 });

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { fetchSimpleForecast, fetchTickerNews, wakeForecastService } from './api/simpleForecastClient';
-import { clearPriceHistoryCache, fetchPriceHistory } from './api/priceHistoryClient';
+import { fetchPriceHistory } from './api/priceHistoryClient';
 import { assertTickerIdentity, assertMarketIdentity } from './api/request';
 import StockAutocomplete from './components/StockAutocomplete';
 import PriceChart from './components/PriceChart';
@@ -8,21 +8,12 @@ import VolatilityOutlook from './components/VolatilityOutlook';
 import ForecastLedgerTrackRecord from './components/ForecastLedgerTrackRecord';
 import { ALL_VALID_TICKERS, ALL_TICKERS_SET } from './universe';
 
-function formatMoney(value, currencySymbol = '$') {
-  if (value == null || value === '' || !Number.isFinite(Number(value))) return '—';
-  const num = Number(value);
-  if (currencySymbol === 'p' || currencySymbol === 'GBp') {
-    return `${num.toLocaleString('en-GB', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}p`;
-  }
-  return num.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
-}
-
 function formatPercent(value, digits = 1) {
   if (value == null || value === '' || !Number.isFinite(Number(value))) return '—';
   return `${Number(value).toFixed(digits)}%`;
 }
 
-function ServiceBadge({ status, attempt }) {
+function ServiceBadge({ status, attempt, onRetry }) {
   const copy = {
     checking: `Starting forecast service${attempt > 1 ? ` · attempt ${attempt}` : ''}…`,
     online: 'Forecast service reachable',
@@ -30,8 +21,13 @@ function ServiceBadge({ status, attempt }) {
   }[status];
   return (
     <div className={`service-badge ${status}`} role="status" aria-label={copy}>
-      <span />
+      <span aria-hidden="true" />
       {copy}
+      {status === 'offline' && onRetry && (
+        <button type="button" className="retry-action-btn service-retry-btn" onClick={onRetry}>
+          Retry connection
+        </button>
+      )}
     </div>
   );
 }
@@ -233,7 +229,8 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('overview'); // 'overview' | 'news' | 'performance'
   const [serviceStatus, setServiceStatus] = useState('checking');
   const [wakeAttempt, setWakeAttempt] = useState(1);
-  const [loading, setLoading] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [forecastLoading, setForecastLoading] = useState(false);
   const [forecast, setForecast] = useState(null);
   const [news, setNews] = useState(null);
   const [newsLoading, setNewsLoading] = useState(false);
@@ -244,10 +241,14 @@ export default function App() {
   const [marketHistory, setMarketHistory] = useState(null);
   const [perf, setPerf] = useState(null);
 
+  const loading = historyLoading || forecastLoading;
+
   const wakeController = useRef(null);
   const requestController = useRef(null);
   const requestSeq = useRef(0);
   const perfT0 = useRef(0);
+  const marketHistoryRef = useRef(marketHistory);
+  marketHistoryRef.current = marketHistory;
 
   const wake = useCallback(async () => {
     wakeController.current?.abort();
@@ -256,7 +257,7 @@ export default function App() {
     setServiceStatus('checking');
     try {
       await wakeForecastService({ signal: controller.signal, onAttempt: setWakeAttempt });
-      setServiceStatus('online');
+      if (!controller.signal.aborted) setServiceStatus('online');
     } catch (wakeError) {
       if (wakeError?.name !== 'AbortError') setServiceStatus('offline');
     }
@@ -287,7 +288,7 @@ export default function App() {
     setPerf((prev) => ({ ...(prev || {}), chartMs, fetchMs: report?.fetchMs ?? null, cacheLabel, degraded: Boolean(report?.degraded) }));
   }, [nowMs]);
 
-  const runForecast = useCallback(async (eventOrSymbol) => {
+  const runForecast = useCallback(async (eventOrSymbol, { forceRefresh = false } = {}) => {
     if (eventOrSymbol && typeof eventOrSymbol.preventDefault === 'function') {
       eventOrSymbol.preventDefault();
     }
@@ -304,9 +305,9 @@ export default function App() {
       return;
     }
 
-    clearPriceHistoryCache();
-    setRefreshToken((value) => value + 1);
-    setMarketHistory(null);
+    if (forceRefresh) {
+      setRefreshToken((value) => value + 1);
+    }
     setInputError('');
     setHistoryError('');
     setForecastError('');
@@ -317,24 +318,28 @@ export default function App() {
     requestController.current = controller;
     const seq = ++requestSeq.current;
 
+    const isSameTicker = chartTicker === symbol;
     // Clear previous results when selecting a different stock
-    if (chartTicker !== symbol) {
+    if (!isSameTicker) {
       setChartTicker(null);
+      setMarketHistory(null);
     }
     setForecast(null);
     setNews(null);
     setPerf(null);
     setSubmittedTicker(symbol);
-    setLoading(true);
+    setHistoryLoading(true);
+    setForecastLoading(true);
     setNewsLoading(true);
 
     perfT0.current = (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
-    let historyUsable = chartTicker === symbol;
+    let historyUsable = isSameTicker && Boolean(marketHistoryRef.current?.daily?.length);
     let fallbackAvailable = false;
+    let historyFailureMessage = '';
 
-    // 1. History request: reveals chart when usable historical data arrives
-    const historyPromise = fetchPriceHistory(symbol, { signal: controller.signal })
+    // 1. History request: decoupled from slow /forecast, reveals chart immediately when ready
+    const historyPromise = fetchPriceHistory(symbol, { signal: controller.signal, forceRefresh })
       .then((historyResult) => {
         if (requestSeq.current !== seq) return null;
         assertTickerIdentity(historyResult, symbol);
@@ -343,11 +348,14 @@ export default function App() {
           historyUsable = true;
           setChartTicker(symbol);
         }
+        setHistoryLoading(false);
         return historyResult;
       })
       .catch((err) => {
         if (requestSeq.current !== seq) return null;
+        setHistoryLoading(false);
         if (err?.name !== 'AbortError') {
+          historyFailureMessage = err?.message || 'Price history is unavailable for this stock right now.';
           return { error: err };
         }
         return null;
@@ -361,7 +369,7 @@ export default function App() {
         setServiceStatus('online');
       }
       const forecastT0 = nowMs();
-      const forecastValue = await fetchSimpleForecast(symbol, { signal: controller.signal });
+      const forecastValue = await fetchSimpleForecast(symbol, { signal: controller.signal, forceRefresh });
       if (requestSeq.current !== seq) return null;
       assertTickerIdentity(forecastValue, symbol);
       setForecast(forecastValue);
@@ -381,9 +389,11 @@ export default function App() {
           setChartTicker(symbol);
         }
       }
+      setForecastLoading(false);
       return forecastValue;
     })().catch((err) => {
       if (requestSeq.current !== seq) return null;
+      setForecastLoading(false);
       if (err?.name !== 'AbortError') {
         setForecastError(err?.message || 'The forecast could not be completed.');
       }
@@ -391,35 +401,69 @@ export default function App() {
     });
 
     // 3. News request
-    const newsPromise = fetchTickerNews(symbol, { signal: controller.signal })
+    const newsPromise = fetchTickerNews(symbol, { signal: controller.signal, forceRefresh })
       .then((newsResult) => {
         if (requestSeq.current !== seq) return null;
         assertTickerIdentity(newsResult, symbol);
         setNews(newsResult);
+        setNewsLoading(false);
         return newsResult;
       })
       .catch((err) => {
         if (requestSeq.current !== seq) return null;
+        setNewsLoading(false);
         if (err?.name !== 'AbortError') {
           setNews({ status: 'unavailable', items: [] });
         }
         return null;
       });
 
-    const [histSettled] = await Promise.allSettled([historyPromise, forecastPromise, newsPromise]);
+    await Promise.allSettled([historyPromise, forecastPromise]);
     if (requestSeq.current !== seq) return;
-    setLoading(false);
-    setNewsLoading(false);
+    setHistoryLoading(false);
+    setForecastLoading(false);
 
     if (!historyUsable && !fallbackAvailable) {
-      const histErr = histSettled?.value?.error?.message;
-      setHistoryError(histErr || 'Price history is unavailable for this stock right now.');
+      setHistoryError(historyFailureMessage || 'Price history is unavailable for this stock right now.');
     }
+    await newsPromise;
   }, [inputTicker, nowMs, serviceStatus, chartTicker]);
+
+  const handleRetry = useCallback(() => {
+    if (submittedTicker) {
+      runForecast(submittedTicker, { forceRefresh: true });
+    }
+  }, [runForecast, submittedTicker]);
 
   let identityError = '';
   try { if (forecast && marketHistory) assertMarketIdentity(forecast, marketHistory); }
   catch (error) { identityError = error.message; }
+
+  const unifiedError = useMemo(() => {
+    if (loading) return null;
+    if (!historyError && !forecastError) return null;
+    if (historyError && forecastError) {
+      const same = historyError.trim().toLowerCase() === forecastError.trim().toLowerCase();
+      return {
+        message: same ? historyError : `${historyError} ${forecastError}`,
+        actionLabel: 'Retry',
+      };
+    }
+    if (historyError) {
+      return { message: historyError, actionLabel: 'Retry' };
+    }
+    return { message: forecastError, actionLabel: 'Retry forecast' };
+  }, [loading, historyError, forecastError]);
+
+  const resolvedCurrencySymbol = chartTicker
+    ? (
+      forecast?.ticker === chartTicker && forecast?.currency_symbol
+        ? forecast.currency_symbol
+        : (marketHistory?.ticker === chartTicker && marketHistory?.currencySymbol
+          ? marketHistory.currencySymbol
+          : (chartTicker.endsWith('.L') ? 'p' : '$'))
+    )
+    : '$';
 
   return (
     <div className="app-shell">
@@ -438,7 +482,7 @@ export default function App() {
         </a>
 
         <div className="topbar-right">
-          <ServiceBadge status={serviceStatus} attempt={wakeAttempt} />
+          <ServiceBadge status={serviceStatus} attempt={wakeAttempt} onRetry={wake} />
         </div>
       </header>
 
@@ -479,37 +523,26 @@ export default function App() {
               <span>
                 {serviceStatus !== 'online'
                   ? `Starting forecast service${wakeAttempt > 1 ? ` · attempt ${wakeAttempt}` : ''}… Preparing data for ${submittedTicker}…`
-                  : `Loading data for ${submittedTicker}…`}
+                  : historyLoading
+                    ? `Loading data for ${submittedTicker}…`
+                    : `Loading forecast for ${submittedTicker}…`}
               </span>
             </div>
           )}
 
-          {historyError && !loading && (
-            <div className="compact-error-message" role="alert">
-              <span>{historyError}</span>
+          {unifiedError && (
+            <div className="actionable-forecast-error" role="alert">
+              <span>{unifiedError.message}</span>
               <button
                 type="button"
                 className="retry-action-btn"
-                onClick={() => runForecast(submittedTicker)}
+                onClick={handleRetry}
               >
-                Retry
+                {unifiedError.actionLabel}
               </button>
             </div>
           )}
         </section>
-
-            {forecastError && !loading && (
-              <div className="actionable-forecast-error" role="alert">
-                <span>{forecastError}</span>
-                <button
-                  type="button"
-                  className="retry-action-btn"
-                  onClick={() => runForecast(submittedTicker)}
-                >
-                  Retry forecast
-                </button>
-              </div>
-            )}
 
         {/* Results Workspace */}
         {chartTicker && (
@@ -518,15 +551,15 @@ export default function App() {
             <PriceChart
               ticker={chartTicker}
               refreshToken={refreshToken}
-              currencySymbol={
-                forecast?.ticker === chartTicker && forecast?.currency_symbol
-                  ? forecast.currency_symbol
-                  : (chartTicker.endsWith('.L') ? 'p' : '$')
-              }
+              marketHistory={marketHistory}
+              historyLoading={historyLoading}
+              historyError={historyError}
+              onRetryHistory={handleRetry}
+              currencySymbol={resolvedCurrencySymbol}
               forecast={forecast?.ticker === chartTicker ? forecast : null}
               companyName={forecast?.ticker === chartTicker ? forecast.ticker_name : null}
               onHistorySettled={handleHistorySettled}
-              onRetryForecast={() => runForecast(submittedTicker)}
+              onRetryForecast={handleRetry}
             />
 
             {/* Supporting Information Behind Overview / News / Performance Tabs */}
@@ -581,65 +614,56 @@ export default function App() {
                 </button>
               </div>
 
-              {activeTab === 'overview' && (
-                <div id="panel-overview" role="tabpanel" aria-labelledby="tab-overview">
-                  <VolatilityOutlook
-                    refreshToken={refreshToken}
-                    expectedIdentity={marketHistory || forecast}
-                    ticker={chartTicker}
-                    currencySymbol={
-                      forecast?.ticker === chartTicker && forecast?.currency_symbol
-                        ? forecast.currency_symbol
-                        : (chartTicker.endsWith('.L') ? 'p' : '$')
-                    }
-                    currentPrice={forecast?.ticker === chartTicker ? forecast?.current_price : null}
-                  />
-                </div>
-              )}
+              <div id="panel-overview" role="tabpanel" aria-labelledby="tab-overview" hidden={activeTab !== 'overview'}>
+                <VolatilityOutlook
+                  refreshToken={refreshToken}
+                  expectedIdentity={marketHistory || forecast}
+                  ticker={chartTicker}
+                  currencySymbol={resolvedCurrencySymbol}
+                  currentPrice={forecast?.ticker === chartTicker ? forecast?.current_price : null}
+                />
+              </div>
 
-              {activeTab === 'news' && (
-                <div id="panel-news" role="tabpanel" aria-labelledby="tab-news">
-                  <NewsPanel
-                    news={news}
-                    ticker={chartTicker}
-                    loading={newsLoading}
-                  />
-                </div>
-              )}
+              <div id="panel-news" role="tabpanel" aria-labelledby="tab-news" hidden={activeTab !== 'news'}>
+                <NewsPanel
+                  key={chartTicker}
+                  news={news}
+                  ticker={chartTicker}
+                  loading={newsLoading}
+                />
+              </div>
 
-              {activeTab === 'performance' && (
-                <div id="panel-performance" role="tabpanel" aria-labelledby="tab-performance">
-                  {forecast?.backtest && !identityError ? (
-                    <BacktestPanel backtest={forecast.backtest} />
-                  ) : (
-                    <div className="panel empty-performance-panel">
-                      <p className="empty-copy">{identityError || (loading ? 'Loading price evidence…' : 'Price evaluation is unavailable for this forecast. Retry the forecast to try again.')}</p>
-                    </div>
-                  )}
+              <div id="panel-performance" role="tabpanel" aria-labelledby="tab-performance" hidden={activeTab !== 'performance'}>
+                {forecast?.backtest && !identityError ? (
+                  <BacktestPanel backtest={forecast.backtest} />
+                ) : (
+                  <div className="panel empty-performance-panel">
+                    <p className="empty-copy">{identityError || (forecastLoading ? 'Loading price evidence…' : 'Price evaluation is unavailable for this forecast. Retry the forecast to try again.')}</p>
+                  </div>
+                )}
 
-                  <ForecastLedgerTrackRecord ticker={chartTicker} />
+                <ForecastLedgerTrackRecord ticker={chartTicker} />
 
-                  {perf && (
-                    <details className="perf-technical-details">
-                      <summary>Technical & operational diagnostics</summary>
-                      <dl className="technical-dl">
-                        <div>
-                          <dt>Price history load:</dt>
-                          <dd className="mono">{perf.chartMs != null ? `${perf.chartMs}ms` : '—'}</dd>
-                        </div>
-                        <div>
-                          <dt>Forecast compute:</dt>
-                          <dd className="mono">{perf.forecastMs != null ? `${perf.forecastMs}ms` : '—'}</dd>
-                        </div>
-                        <div>
-                          <dt>Market data cache:</dt>
-                          <dd className="mono">{perf.cacheLabel || '—'}</dd>
-                        </div>
-                      </dl>
-                    </details>
-                  )}
-                </div>
-              )}
+                {perf && (
+                  <details className="perf-technical-details">
+                    <summary>Technical & operational diagnostics</summary>
+                    <dl className="technical-dl">
+                      <div>
+                        <dt>Price history load:</dt>
+                        <dd className="mono">{perf.chartMs != null ? `${perf.chartMs}ms` : '—'}</dd>
+                      </div>
+                      <div>
+                        <dt>Forecast compute:</dt>
+                        <dd className="mono">{perf.forecastMs != null ? `${perf.forecastMs}ms` : '—'}</dd>
+                      </div>
+                      <div>
+                        <dt>Market data cache:</dt>
+                        <dd className="mono">{perf.cacheLabel || '—'}</dd>
+                      </div>
+                    </dl>
+                  </details>
+                )}
+              </div>
             </div>
           </div>
         )}
