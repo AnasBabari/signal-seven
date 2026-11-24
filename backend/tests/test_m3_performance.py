@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -610,6 +611,7 @@ def test_warm_cache_hit_micro_benchmark_and_rss_bound(monkeypatch, tmp_path) -> 
     monkeypatch.setattr(market, "_fetch_history_intraday", lambda _s: None)
     volatility_snapshot.clear_snapshot_cache()
     simple_forecast.clear_forecast_cache()
+    rss_before_mb = psutil.Process().memory_info().rss / (1024 * 1024)
 
     # Cold warm-up call for each endpoint
     assert CLIENT.get("/api/v1/history?ticker=AAPL").status_code == 200
@@ -639,6 +641,11 @@ def test_warm_cache_hit_micro_benchmark_and_rss_bound(monkeypatch, tmp_path) -> 
         assert p50 < 350.0, f"Warm {name} p50={p50:.1f}ms exceeded 350ms SLO"
 
     rss_mb = psutil.Process().memory_info().rss / (1024 * 1024)
-    assert rss_mb < 512.0, f"Process RSS {rss_mb:.1f}MB exceeded 512MB Render Free envelope"
+    rss_delta_mb = rss_mb - rss_before_mb
+    assert rss_delta_mb < 128.0, f"Warm serving RSS grew by {rss_delta_mb:.1f}MB (limit 128MB)"
+    # CI installs research-only CPU PyTorch (~300MB RSS) in the same pytest process.
+    # Enforce the strict 512MB Render Free ceiling whenever torch is not loaded.
+    if "torch" not in sys.modules:
+        assert rss_mb < 512.0, f"Process RSS {rss_mb:.1f}MB exceeded 512MB Render Free envelope"
     volatility_snapshot.clear_snapshot_cache()
     simple_forecast.clear_forecast_cache()
