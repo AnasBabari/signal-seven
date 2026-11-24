@@ -1708,7 +1708,59 @@ strong.mono.flat {
   border-bottom-color: var(--accent);
 }
 
-/* 8. Compact Horizon Rows for Volatility Outlook */
+/* 8. Compact Horizon Rows for Volatility Outlook & Company Fundamentals */
+.fundamentals-strip {
+  padding: 18px 24px;
+  margin-bottom: 18px;
+}
+
+.fundamentals-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.fundamental-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  background: rgba(10, 15, 26, 0.7);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.fundamental-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.fundamental-value {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 900px) {
+  .fundamentals-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 480px) {
+  .fundamentals-strip {
+    padding: 14px 16px;
+  }
+  .fundamentals-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .horizon-rows-list {
   display: flex;
   flex-direction: column;
@@ -1901,9 +1953,60 @@ strong.mono.flat {
   flex-shrink: 0;
 }
 
-/* 9. News Simple List */
+/* 9. News Simple List & SEC EDGAR Filings */
 .news-top-disclosure {
   margin-bottom: 14px !important;
+}
+
+.news-filter-bar {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 14px;
+  padding: 4px;
+  background: rgba(10, 15, 26, 0.75);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+}
+
+.news-filter-btn {
+  padding: 5px 12px;
+  border-radius: var(--radius-full);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  transition: all 0.15s ease;
+}
+
+.news-filter-btn:hover {
+  color: var(--text-primary);
+}
+
+.news-filter-btn.active {
+  background: var(--accent);
+  color: #060911;
+  font-weight: 700;
+}
+
+.sec-filing-item {
+  border-color: rgba(56, 189, 248, 0.28);
+  background: rgba(12, 20, 36, 0.72);
+}
+
+.sec-filing-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: var(--radius-full);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #7dd3fc;
+  background: rgba(56, 189, 248, 0.14);
+  border: 1px solid rgba(56, 189, 248, 0.4);
 }
 
 .news-simple-list {

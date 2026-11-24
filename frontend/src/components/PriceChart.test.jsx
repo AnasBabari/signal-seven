@@ -7,11 +7,16 @@ vi.mock('../hooks/usePriceHistory', () => ({
   usePriceHistory: vi.fn(),
 }));
 
+vi.mock('../api/priceHistoryClient', () => ({
+  fetchIntradayHistory: vi.fn(),
+}));
+
 vi.mock('../hooks/useVolatilityOutlook', () => ({
   useVolatilityOutlook: vi.fn(() => ({ outlook: null, loading: false, error: '', retry: vi.fn() })),
 }));
 
 import { usePriceHistory } from '../hooks/usePriceHistory';
+import { fetchIntradayHistory } from '../api/priceHistoryClient';
 import { useVolatilityOutlook } from '../hooks/useVolatilityOutlook';
 
 let lastChartProps = null;
@@ -285,4 +290,25 @@ it('offers an opt-in Table toolbar toggle and auto-opens the table on chart engi
   const formatted = tickCallback.call({ getLabelForValue: (v) => lastChartProps.data.labels[v] }, 0);
   expect(formatted).toMatch(/^\d{2}-\d{2}$/);
   expect(lastChartProps['aria-label']).toContain('MSFT historical closes');
+});
+
+it('lazily fetches /api/v1/intraday when user clicks 24H and history has intraday_available: true', async () => {
+  const lazyBars = Array.from({ length: 6 }, (_, i) => ({
+    t: `2024-06-01T14:0${i}:00Z`,
+    c: 400 + i,
+  }));
+  fetchIntradayHistory.mockResolvedValueOnce({ ticker: 'MSFT', bars: lazyBars, intradaySession: '2024-06-01' });
+  const hist = { ...historyFixture(300, false), intradayAvailable: true };
+  const onRangeChange = vi.fn();
+  usePriceHistory.mockReturnValue({ history: hist, loading: false, error: '', retry: vi.fn() });
+
+  render(<PriceChart ticker="MSFT" onRangeChange={onRangeChange} />);
+  expect(fetchIntradayHistory).not.toHaveBeenCalled();
+  const btn24h = screen.getByRole('button', { name: '24H' });
+  fireEvent.click(btn24h);
+  expect(onRangeChange).toHaveBeenCalledWith('24H');
+  expect(fetchIntradayHistory).toHaveBeenCalledWith('MSFT', expect.anything());
+  await act(async () => { await Promise.resolve(); });
+  expect(btn24h).toHaveAttribute('aria-pressed', 'true');
+  expect(lastChartProps.data.labels).toHaveLength(6);
 });

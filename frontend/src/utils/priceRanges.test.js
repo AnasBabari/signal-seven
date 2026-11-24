@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   availableRanges,
   defaultRangeId,
+  hasValidIntradayBars,
   periodChange,
   sliceRangePoints,
 } from './priceRanges';
@@ -41,6 +42,12 @@ describe('availableRanges', () => {
 
   it('shows nothing without history', () => {
     expect(availableRanges({ dailyCount: 0, hasIntraday: false })).toEqual([]);
+  });
+
+  it('exposes 24H when intradayAvailable flag is true and validates minimum 5 intraday bars', () => {
+    expect(availableRanges({ dailyCount: 300, hasIntraday: false, intradayAvailable: true })).toContain('24H');
+    expect(hasValidIntradayBars(Array.from({ length: 4 }, (_, i) => ({ t: `2026-09-03T14:0${i}:00Z`, c: 100 + i })))).toBe(false);
+    expect(hasValidIntradayBars(Array.from({ length: 5 }, (_, i) => ({ t: `2026-09-03T14:0${i}:00Z`, c: 100 + i })))).toBe(true);
   });
 });
 

@@ -128,8 +128,10 @@ test('desktop 1440x900: single history fetch, zero tab refetches, hidden empty l
   await submit(page);
 
   await expect(page.getByRole('heading', { name: 'Volatility Outlook' })).toBeVisible();
+  await expect(page.getByLabel('MSFT company fundamentals')).toContainText('$3.12T');
   await expect(page.locator('.chart-estimate-bar')).toContainText('Historical error range (experimental)');
   await expect(page.locator('.chart-estimate-bar')).not.toContainText(/calibrated|empirical band/i);
+  expect(page.url()).toContain('ticker=MSFT');
 
   const historyCalls = () => requests.filter((u) => u.includes('/api/v1/history'));
   const batchCalls = () => requests.filter((u) => u.includes('/api/v1/volatility/forecast/batch'));
@@ -208,4 +210,39 @@ test('mobile 390x844: 0px autocomplete overlap, Enter dismisses suggestions, opa
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 
   await saveShot(page, testInfo, 'm4-mobile-390x844.png');
+});
+
+test('deep link hydration (?ticker=MSFT&range=MAX&tab=news), SEC filings, lazy 24H intraday, and browser Back work end-to-end', async ({ page }) => {
+  const requests = [];
+  page.on('request', (req) => requests.push(req.url()));
+  await installFixtures(page);
+  await page.goto('/?ticker=MSFT&range=MAX&tab=news');
+  await expect(page.locator('#chartContainer canvas')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'MAX', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#panel-news')).toBeVisible();
+  await expect(page.getByText('[Example fixture] Company update for layout verification')).toBeVisible();
+  await expect(page.locator('.sec-filing-badge')).toHaveText('SEC 10-K');
+  await page.getByRole('button', { name: 'SEC Filings (1)' }).click();
+  await expect(page.getByText('Annual Report (Form 10-K)')).toBeVisible();
+  await expect(page.getByText('[Example fixture] Company update for layout verification')).toHaveCount(0);
+
+  // Intraday endpoint stays lazy until user clicks 24H
+  expect(requests.filter((u) => u.includes('/api/v1/intraday'))).toHaveLength(0);
+  const btn24h = page.getByRole('button', { name: '24H', exact: true });
+  await expect(btn24h).toBeEnabled();
+  await btn24h.click();
+  await expect.poll(() => requests.filter((u) => u.includes('/api/v1/intraday')).length).toBe(1);
+  await expect(btn24h).toHaveAttribute('aria-pressed', 'true');
+  expect(page.url()).toContain('range=24H');
+
+  // Navigating from bare / -> submit MSFT -> browser Back restores bare landing view
+  await page.goto('/');
+  await expect(page.locator('#chartContainer')).toHaveCount(0);
+  await page.getByLabel('Stock ticker').fill('MSFT');
+  await page.getByRole('button', { name: /view outlook/i }).click();
+  await expect(page.locator('#chartContainer canvas')).toBeVisible();
+  expect(page.url()).toContain('ticker=MSFT');
+  await page.goBack();
+  await expect(page.locator('#chartContainer')).toHaveCount(0);
+  expect(new URL(page.url()).search).toBe('');
 });

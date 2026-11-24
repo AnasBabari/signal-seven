@@ -4,6 +4,7 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import App from './App';
 import { clearPriceHistoryCache } from './api/priceHistoryClient';
+import { clearStockInfoCache } from './api/stockInfoClient';
 import { clearVolatilityOutlookCache } from './hooks/useVolatilityOutlook';
 import { clearForecastLedgerCache } from './api/forecastLedgerClient';
 
@@ -108,6 +109,21 @@ function installFetch() {
         }),
       });
     }
+    if (urlStr.includes('/api/v1/info')) {
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({
+          ticker: sym,
+          name: sym === 'SHEL.L' ? 'Shell plc' : `${sym} Corporation`,
+          sector: sym === 'SHEL.L' ? 'Energy' : 'Information Technology',
+          currency: isPence ? 'GBp' : 'USD',
+          marketCap: isPence ? 165_400_000_000 : 3_120_000_000_000,
+          peRatio: null,
+          fiftyTwoWeekLow: basePrice - 40,
+          fiftyTwoWeekHigh: basePrice + 35,
+        }),
+      });
+    }
     if (urlStr.includes('/api/v1/news')) {
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'available', ticker: sym, items: [] }) });
     }
@@ -163,8 +179,10 @@ describe('simplified forecast app', () => {
   beforeEach(() => {
     installFetch();
     clearPriceHistoryCache();
+    clearStockInfoCache();
     clearVolatilityOutlookCache();
     clearForecastLedgerCache();
+    window.history.replaceState(null, '', '/');
   });
 
   it('wakes the backend automatically from the single frontend page without fetching stock data on first visit', async () => {
@@ -812,5 +830,134 @@ describe('simplified forecast app', () => {
     expect(await screen.findByText('NVDA Headline 1')).toBeInTheDocument();
     expect(screen.queryByText('NVDA Headline 6')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /show more stories \(1 more\)/i })).toBeInTheDocument();
+  });
+
+  it('hydrates ?ticker=&range=&tab= deep link on initial mount and syncs pushState/replaceState/popstate', async () => {
+    window.history.replaceState(null, '', '/?ticker=MSFT&range=MAX&tab=news');
+    const pushSpy = vi.spyOn(window.history, 'pushState');
+    const replaceSpy = vi.spyOn(window.history, 'replaceState');
+
+    const user = userEvent.setup();
+    render(<App />);
+
+    expect(await screen.findByText(/Range midpoint — experimental:/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/stock ticker/i)).toHaveValue('MSFT');
+    // Initial hydration does not push a duplicate history entry
+    expect(pushSpy).not.toHaveBeenCalled();
+    // Tab hydrated to News
+    expect(screen.getByRole('tab', { name: /news/i })).toHaveAttribute('aria-selected', 'true');
+    expect(document.getElementById('panel-news')).not.toHaveAttribute('hidden');
+
+    // Switching tab uses replaceState
+    await user.click(screen.getByRole('tab', { name: /overview/i }));
+    expect(replaceSpy).toHaveBeenCalled();
+    expect(window.location.search).toContain('ticker=MSFT');
+    expect(window.location.search).toContain('tab=overview');
+
+    // Submitting a new ticker uses pushState
+    const input = screen.getByLabelText(/stock ticker/i);
+    await user.clear(input);
+    await user.type(input, 'NVDA');
+    await user.click(screen.getByRole('button', { name: /view outlook/i }));
+    await waitFor(() => expect(window.location.search).toContain('ticker=NVDA'));
+    expect(pushSpy).toHaveBeenCalled();
+
+    // Browser Back via popstate to MSFT
+    await act(async () => {
+      window.history.replaceState(null, '', '/?ticker=MSFT&range=MAX&tab=performance');
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+    expect(await screen.findByLabelText(/MSFT price chart/i)).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /performance/i })).toHaveAttribute('aria-selected', 'true');
+
+    // Browser Back via popstate to bare / returns to empty landing screen
+    await act(async () => {
+      window.history.replaceState(null, '', '/');
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+    expect(screen.getByRole('heading', { name: /which stock would you like to explore\?/i })).toBeInTheDocument();
+    expect(document.getElementById('chartContainer')).toBeNull();
+  });
+
+  it('renders partial company fundamentals in Overview with null P/E and GBP (£) market cap for UK .L stocks', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText('Forecast service reachable');
+    const input = screen.getByLabelText(/stock ticker/i);
+
+    await user.type(input, 'MSFT');
+    await user.click(screen.getByRole('button', { name: /view outlook/i }));
+    const msftStrip = await screen.findByLabelText('MSFT company fundamentals');
+    expect(msftStrip).toHaveTextContent('Information Technology');
+    expect(msftStrip).toHaveTextContent('$3.12T');
+    expect(msftStrip).toHaveTextContent('$410.00 – $485.00');
+    expect(msftStrip).toHaveTextContent('—');
+
+    await user.clear(input);
+    await user.type(input, 'SHEL.L');
+    await user.click(screen.getByRole('button', { name: /view outlook/i }));
+    const shelStrip = await screen.findByLabelText('SHEL.L company fundamentals');
+    expect(shelStrip).toHaveTextContent('Energy');
+    expect(shelStrip).toHaveTextContent('£165.4B');
+    expect(shelStrip).toHaveTextContent('2,560.5p – 2,635.5p');
+  });
+
+  it('distinguishes SEC EDGAR filings from news headlines with SEC form badges and filter pills', async () => {
+    const baseFetch = global.fetch;
+    global.fetch = vi.fn((url, init) => {
+      if (String(url).includes('/api/v1/news')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            ticker: 'MSFT',
+            status: 'available',
+            provider: 'institutional_feed',
+            items: [
+              {
+                id: 'headline-1',
+                title: 'Microsoft Cloud Revenue Beats Quarterly Estimates',
+                source: 'Reuters',
+                published_at: '2026-09-03T16:00:00Z',
+                sentiment_label: 'positive',
+              },
+            ],
+            sec_filings: [
+              {
+                id: 'sec-1',
+                kind: 'sec_filing',
+                form: '10-K',
+                title: 'Annual Report Pursuant to Section 13 or 15(d)',
+                source: 'SEC EDGAR',
+                filing_date: '2026-09-02',
+                url: 'https://www.sec.gov/Archives/edgar/data/789019/10k.htm',
+              },
+            ],
+          }),
+        });
+      }
+      return baseFetch(url, init);
+    });
+
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText('Forecast service reachable');
+    await user.type(screen.getByLabelText(/stock ticker/i), 'MSFT');
+    await user.click(screen.getByRole('button', { name: /view outlook/i }));
+    await screen.findByText(/Range midpoint — experimental:/i);
+
+    await user.click(screen.getByRole('tab', { name: /news/i }));
+    expect(await screen.findByText('SEC 10-K')).toBeInTheDocument();
+    expect(screen.getByText('Microsoft Cloud Revenue Beats Quarterly Estimates')).toBeInTheDocument();
+    expect(screen.getByText('Annual Report Pursuant to Section 13 or 15(d)')).toBeInTheDocument();
+
+    // Filter to SEC Filings only
+    await user.click(screen.getByRole('button', { name: /SEC Filings \(1\)/i }));
+    expect(screen.queryByText('Microsoft Cloud Revenue Beats Quarterly Estimates')).not.toBeInTheDocument();
+    expect(screen.getByText('Annual Report Pursuant to Section 13 or 15(d)')).toBeInTheDocument();
+
+    // Filter to Headlines only
+    await user.click(screen.getByRole('button', { name: /Headlines \(1\)/i }));
+    expect(screen.getByText('Microsoft Cloud Revenue Beats Quarterly Estimates')).toBeInTheDocument();
+    expect(screen.queryByText('Annual Report Pursuant to Section 13 or 15(d)')).not.toBeInTheDocument();
   });
 });

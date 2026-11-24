@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { clearPriceHistoryCache, fetchPriceHistory } from './priceHistoryClient';
+import { clearPriceHistoryCache, fetchIntradayHistory, fetchPriceHistory } from './priceHistoryClient';
 
 const payload = {
   ticker: 'MSFT',
@@ -88,4 +88,41 @@ it('refreshes expired data and bypasses fresh data on explicit retry with no-cac
   expect(fetchMock).toHaveBeenCalledTimes(3);
   expect(fetchMock.mock.calls[2][1]).toHaveProperty('cache', 'no-cache');
   vi.useRealTimers();
+});
+
+it('fetches and caches lazy 24H intraday bars and enforces the 5-bar minimum', async () => {
+  const fiveBars = Array.from({ length: 5 }, (_, i) => ({
+    t: `2026-09-03T14:0${i}:00Z`,
+    c: 450 + i * 0.25,
+  }));
+  const fetchMock = vi.fn().mockResolvedValueOnce({
+    ok: true,
+    json: async () => ({
+      ticker: 'MSFT',
+      session: '2026-09-03',
+      bars: fiveBars,
+      bar_count: fiveBars.length,
+      available: true,
+    }),
+  }).mockResolvedValueOnce({
+    ok: true,
+    json: async () => ({
+      ticker: 'AAPL',
+      session: null,
+      bars: fiveBars.slice(0, 3),
+      bar_count: 3,
+      available: false,
+    }),
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  clearPriceHistoryCache();
+
+  const first = await fetchIntradayHistory('MSFT');
+  const cached = await fetchIntradayHistory('MSFT');
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(first.bars).toHaveLength(5);
+  expect(first.intradaySession).toBe('2026-09-03');
+  expect(cached).toEqual(first);
+
+  await expect(fetchIntradayHistory('AAPL')).rejects.toThrow(/minimum 5 required/);
 });

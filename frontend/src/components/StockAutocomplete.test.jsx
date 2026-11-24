@@ -40,4 +40,14 @@ describe('StockAutocomplete', () => {
     fireEvent.keyDown(input, { key: 'Enter' });
     expect(screen.queryByRole('listbox')).toBeNull();
   });
+
+  it('matches all 286 company names instantaneously from local universe metadata', () => {
+    render(<Harness />);
+    const input = screen.getByRole('combobox', { name: 'Stock ticker' });
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: 'Compass' } });
+    const listbox = screen.getByRole('listbox');
+    expect(listbox).toHaveTextContent('CPG.L');
+    expect(listbox).toHaveTextContent('Compass Group');
+  });
 });

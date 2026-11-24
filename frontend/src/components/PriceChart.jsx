@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { usePriceHistory } from '../hooks/usePriceHistory';
+import { fetchIntradayHistory } from '../api/priceHistoryClient';
 import {
   CHART_RANGES,
   availableRanges,
   defaultRangeId,
+  hasValidIntradayBars,
   periodChange,
   sliceRangePoints,
 } from '../utils/priceRanges';
@@ -167,6 +169,8 @@ export default function PriceChart({
   historyLoading,
   historyError,
   onRetryHistory = null,
+  selectedRange = null,
+  onRangeChange = null,
 }) {
   const isMobile = useIsMobileViewport();
   const isControlledHistory = marketHistory !== undefined
@@ -183,7 +187,14 @@ export default function PriceChart({
   const descriptionId = React.useId();
   const tablePanelId = `${descriptionId}-table`;
   const [tableOpen, setTableOpen] = useState(false);
-  const [rangeId, setRangeId] = useState(null);
+  const [rangeId, setRangeId] = useState(selectedRange);
+  const [lazyIntraday, setLazyIntraday] = useState({
+    ticker: null,
+    bars: null,
+    loading: false,
+    error: '',
+    unavailable: false,
+  });
   const [view, setView] = useState(null);
   const [isInteracting, setIsInteracting] = useState(false);
   const [showForecast, setShowForecast] = useState(true);
@@ -253,31 +264,88 @@ export default function PriceChart({
     }
   }, [effectiveHistory, showError, history, fallbackHistory, meta, ticker, refreshToken, onHistorySettled]);
 
-  const hasIntraday = Array.isArray(effectiveHistory?.intraday) && effectiveHistory.intraday.length >= 5;
+  const inlineIntraday = hasValidIntradayBars(effectiveHistory?.intraday) ? effectiveHistory.intraday : null;
+  const resolvedIntraday = inlineIntraday
+    || (lazyIntraday.ticker === ticker && hasValidIntradayBars(lazyIntraday.bars) ? lazyIntraday.bars : null);
+  const hasIntraday = Boolean(resolvedIntraday);
+  const intradayAvailable = hasIntraday || (
+    Boolean(effectiveHistory?.intradayAvailable || effectiveHistory?.intraday_available)
+    && !(lazyIntraday.ticker === ticker && lazyIntraday.unavailable)
+  );
   const dailyCount = Array.isArray(effectiveHistory?.daily) ? effectiveHistory.daily.length : 0;
   const available = useMemo(
-    () => (effectiveHistory ? availableRanges({ dailyCount, hasIntraday }) : []),
-    [effectiveHistory, dailyCount, hasIntraday],
+    () => (effectiveHistory ? availableRanges({ dailyCount, hasIntraday, intradayAvailable }) : []),
+    [effectiveHistory, dailyCount, hasIntraday, intradayAvailable],
   );
 
   useEffect(() => {
+    setLazyIntraday({ ticker: null, bars: null, loading: false, error: '', unavailable: false });
+  }, [ticker, refreshToken]);
+
+  useEffect(() => {
     setRangeId((current) => {
-      const avail = availableRanges({ dailyCount, hasIntraday });
+      const avail = availableRanges({ dailyCount, hasIntraday, intradayAvailable });
+      if (selectedRange && avail.includes(selectedRange)) return selectedRange;
       const next = effectiveHistory ? defaultRangeId(avail) : null;
       return current && avail.includes(current) ? current : next;
     });
     setView(null);
     setIsInteracting(false);
-  }, [effectiveHistory, dailyCount, hasIntraday, ticker]);
+  }, [effectiveHistory, dailyCount, hasIntraday, intradayAvailable, ticker, selectedRange]);
 
-  const points = useMemo(
-    () => (effectiveHistory && rangeId
-      ? sliceRangePoints(effectiveHistory, rangeId)
-      : { labels: [], prices: [], isIntraday: false }),
-    [effectiveHistory, rangeId],
+  const activeRange = rangeId || (selectedRange && available.includes(selectedRange) ? selectedRange : defaultRangeId(available));
+
+  useEffect(() => {
+    if (activeRange !== '24H' || resolvedIntraday || !intradayAvailable || !ticker) return undefined;
+    const controller = new AbortController();
+    setLazyIntraday((prev) => ({
+      ticker,
+      bars: prev.ticker === ticker ? prev.bars : null,
+      loading: true,
+      error: '',
+      unavailable: false,
+    }));
+    fetchIntradayHistory(ticker, { signal: controller.signal })
+      .then((res) => {
+        if (controller.signal.aborted) return;
+        setLazyIntraday({
+          ticker,
+          bars: res.bars,
+          loading: false,
+          error: '',
+          unavailable: false,
+        });
+      })
+      .catch((err) => {
+        if (controller.signal.aborted) return;
+        const fallbackAvail = availableRanges({ dailyCount, hasIntraday: false, intradayAvailable: false });
+        const fallbackRange = defaultRangeId(fallbackAvail);
+        setLazyIntraday({
+          ticker,
+          bars: null,
+          loading: false,
+          error: err?.message || '24H intraday bars are unavailable for this session.',
+          unavailable: true,
+        });
+        setRangeId(fallbackRange);
+        onRangeChange?.(fallbackRange);
+      });
+    return () => controller.abort();
+  }, [activeRange, resolvedIntraday, intradayAvailable, ticker, dailyCount, onRangeChange]);
+
+  const historyForSlice = useMemo(
+    () => (effectiveHistory ? { ...effectiveHistory, intraday: resolvedIntraday } : null),
+    [effectiveHistory, resolvedIntraday],
   );
 
-  const activeRange = rangeId || defaultRangeId(available);
+  const points = useMemo(
+    () => (historyForSlice && activeRange
+      ? sliceRangePoints(historyForSlice, activeRange)
+      : { labels: [], prices: [], isIntraday: false }),
+    [historyForSlice, activeRange],
+  );
+
+  const showIntradayLoading = activeRange === '24H' && lazyIntraday.loading && !resolvedIntraday;
   const isIntradayRange = activeRange === '24H' || points.isIntraday;
   const isMultiYearRange = activeRange === '5Y' || (
     activeRange === 'MAX'
@@ -741,7 +809,8 @@ export default function PriceChart({
     setRangeId(id);
     setView(null);
     setIsInteracting(false);
-  }, []);
+    onRangeChange?.(id);
+  }, [onRangeChange]);
 
   const resetZoom = useCallback(() => {
     setView(null);
@@ -970,14 +1039,16 @@ export default function PriceChart({
           </div>
         )}
 
-        {showLoading && (
+        {(showLoading || showIntradayLoading) && (
           <div className="t212-chart-skeleton" role="status" aria-live="polite">
             <span className="t212-skeleton-bars" aria-hidden="true">
               {Array.from({ length: 24 }, (_, index) => (
                 <i key={index} style={{ height: `${28 + ((index * 37) % 62)}%` }} />
               ))}
             </span>
-            <span className="t212-skeleton-label">Loading price history…</span>
+            <span className="t212-skeleton-label">
+              {showIntradayLoading ? 'Loading 24H intraday bars…' : 'Loading price history…'}
+            </span>
           </div>
         )}
 
@@ -989,7 +1060,7 @@ export default function PriceChart({
         )}
 
         <div className="t212-canvas-viewport">
-          {!showLoading && !showError && effectiveHistory && points.labels.length > 0 && (
+          {!showLoading && !showIntradayLoading && !showError && effectiveHistory && points.labels.length > 0 && (
             <React.Suspense fallback={<div className="loading-text">Loading Chart…</div>}>
               <LazyLineChart
                 ref={chartRef}
@@ -1004,7 +1075,7 @@ export default function PriceChart({
             </React.Suspense>
           )}
 
-          {!showLoading && !showError && effectiveHistory && points.labels.length === 0 && (
+          {!showLoading && !showIntradayLoading && !showError && effectiveHistory && points.labels.length === 0 && (
             <div className="empty-copy">Not enough price history for this view.</div>
           )}
         </div>

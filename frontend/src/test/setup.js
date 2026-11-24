@@ -5,6 +5,9 @@ import '@testing-library/jest-dom/vitest';
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  if (typeof window !== 'undefined' && typeof window.history?.replaceState === 'function') {
+    window.history.replaceState(null, '', '/');
+  }
 });
 
 global.ResizeObserver = class {

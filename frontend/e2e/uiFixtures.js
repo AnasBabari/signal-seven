@@ -69,6 +69,7 @@ export function installFixtures(page, failedHorizon = null, priceOverrides = {})
     if (url.pathname.endsWith('/history')) {
       return route.fulfill({ json: {
         ticker: 'MSFT', as_of: origin,
+        intraday_available: true,
         daily: historyDates.map((d, i) => ({ d, c: 447.9 + i * 0.3 })),
       } });
     }
@@ -100,10 +101,44 @@ export function installFixtures(page, failedHorizon = null, priceOverrides = {})
         replay_track_record: { total_forecasts: 0 },
       } });
     }
+    if (url.pathname.endsWith('/info')) {
+      return route.fulfill({ json: {
+        ticker: 'MSFT',
+        name: 'Microsoft Corp.',
+        sector: 'Information Technology',
+        currency: 'USD',
+        marketCap: 3_120_000_000_000,
+        peRatio: null,
+        fiftyTwoWeekLow: 385.5,
+        fiftyTwoWeekHigh: 468.35,
+      } });
+    }
+    if (url.pathname.endsWith('/intraday')) {
+      const bars = Array.from({ length: 6 }, (_, i) => ({
+        t: `${origin}T14:0${i}:00Z`,
+        c: 448.5 + i * 0.3,
+      }));
+      return route.fulfill({ json: {
+        ticker: 'MSFT',
+        session: origin,
+        bars,
+        bar_count: bars.length,
+        available: true,
+      } });
+    }
     if (url.pathname.endsWith('/news')) return route.fulfill({ json: {
       status: 'available', provider: 'verification_fixture', ticker: 'MSFT',
       items: [{ id: 'example-1', title: '[Example fixture] Company update for layout verification',
         source: 'Example fixture — not live news', published_at: '2026-09-03T12:00:00Z' }],
+      sec_filings: [{
+        id: 'sec-10k-1',
+        kind: 'sec_filing',
+        form: '10-K',
+        title: 'Annual Report (Form 10-K)',
+        source: 'SEC EDGAR',
+        filing_date: '2026-08-01',
+        url: 'https://www.sec.gov/example-10k',
+      }],
     } });
     return route.fulfill({ json: {} });
   });

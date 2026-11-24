@@ -1,8 +1,11 @@
 import React, { useEffect, useState } from 'react';
-import { ALL_VALID_TICKERS, ALL_TICKERS_SET } from '../universe';
+import { ALL_VALID_TICKERS, ALL_TICKERS_SET, TICKER_METADATA } from '../universe';
 import { requestJson } from '../api/request';
 
-const LOCAL_ITEMS = ALL_VALID_TICKERS.map((ticker) => ({ ticker, name: ticker }));
+const LOCAL_ITEMS = ALL_VALID_TICKERS.map((ticker) => ({
+  ticker,
+  name: TICKER_METADATA?.[ticker]?.name || ticker,
+}));
 
 export function rankSuggestions(items, rawQuery) {
   const query = String(rawQuery || '').trim().toUpperCase();

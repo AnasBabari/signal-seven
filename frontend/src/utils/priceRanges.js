@@ -7,6 +7,8 @@
  * any daily history exists.
  */
 
+export const MIN_INTRADAY_BARS = 5;
+
 export const CHART_RANGES = [
   { id: '24H', label: '24H', kind: 'intraday' },
   { id: '5D', label: '5D', kind: 'daily', sessions: 5 },
@@ -19,10 +21,21 @@ export const CHART_RANGES = [
 
 const DEFAULT_PREFERENCE = ['1M', '5D', '24H', '6M', '1Y', '5Y', 'MAX'];
 
-export function availableRanges({ dailyCount = 0, hasIntraday = false } = {}) {
+export function hasValidIntradayBars(bars) {
+  if (!Array.isArray(bars) || bars.length < MIN_INTRADAY_BARS) return false;
+  let validCount = 0;
+  for (const bar of bars) {
+    if (bar && typeof bar.t === 'string' && bar.t.trim() && Number.isFinite(Number(bar.c)) && Number(bar.c) > 0) {
+      validCount += 1;
+    }
+  }
+  return validCount >= MIN_INTRADAY_BARS;
+}
+
+export function availableRanges({ dailyCount = 0, hasIntraday = false, intradayAvailable = false } = {}) {
   if (!(dailyCount >= 1)) return [];
   return CHART_RANGES.filter((range) => {
-    if (range.kind === 'intraday') return hasIntraday;
+    if (range.kind === 'intraday') return Boolean(hasIntraday || intradayAvailable);
     if (range.sessions === Number.POSITIVE_INFINITY) return true;
     return dailyCount >= range.sessions;
   }).map((range) => range.id);

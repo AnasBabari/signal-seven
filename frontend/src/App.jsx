@@ -1,12 +1,51 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { fetchSimpleForecast, fetchTickerNews, wakeForecastService } from './api/simpleForecastClient';
 import { fetchPriceHistory } from './api/priceHistoryClient';
+import { fetchStockInfo, formatCompactMarketCap } from './api/stockInfoClient';
 import { assertTickerIdentity, assertMarketIdentity } from './api/request';
 import StockAutocomplete from './components/StockAutocomplete';
 import PriceChart from './components/PriceChart';
 import VolatilityOutlook from './components/VolatilityOutlook';
 import ForecastLedgerTrackRecord from './components/ForecastLedgerTrackRecord';
 import { ALL_VALID_TICKERS, ALL_TICKERS_SET } from './universe';
+
+const VALID_TABS = new Set(['overview', 'news', 'performance']);
+const VALID_RANGES = new Set(['24H', '5D', '1M', '6M', '1Y', '5Y', 'MAX']);
+
+export function parseDeepLinkSearch(search = '') {
+  const params = new URLSearchParams(search || '');
+  const rawTicker = String(params.get('ticker') || '').trim().toUpperCase();
+  const ticker = rawTicker && ALL_TICKERS_SET.has(rawTicker) ? rawTicker : null;
+  const rawTab = String(params.get('tab') || '').trim().toLowerCase();
+  const tab = VALID_TABS.has(rawTab) ? rawTab : 'overview';
+  const rawRange = String(params.get('range') || '').trim().toUpperCase();
+  const range = VALID_RANGES.has(rawRange) ? rawRange : null;
+  return { ticker, tab, range };
+}
+
+export function buildDeepLinkUrl({ ticker, range, tab } = {}) {
+  const pathname = typeof window !== 'undefined' && window.location?.pathname ? window.location.pathname : '/';
+  if (!ticker) return pathname;
+  const params = new URLSearchParams();
+  params.set('ticker', String(ticker).trim().toUpperCase());
+  params.set('range', VALID_RANGES.has(String(range || '').toUpperCase()) ? String(range).toUpperCase() : '1M');
+  params.set('tab', VALID_TABS.has(String(tab || '').toLowerCase()) ? String(tab).toLowerCase() : 'overview');
+  return `${pathname}?${params.toString()}`;
+}
+
+function formatSharePrice(value, currencySymbol = '$') {
+  if (value == null || value === '' || !Number.isFinite(Number(value))) return '—';
+  const isPence = currencySymbol === 'p' || currencySymbol === 'GBp';
+  const symbol = isPence ? 'p' : (currencySymbol || '$');
+  const decimals = isPence ? 1 : 2;
+  const numeric = Number(value);
+  const formatted = Math.abs(numeric).toLocaleString('en-US', {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  });
+  if (isPence) return `${numeric < 0 ? '-' : ''}${formatted}p`;
+  return `${numeric < 0 ? '-' : ''}${symbol}${formatted}`;
+}
 
 function formatPercent(value, digits = 1) {
   if (value == null || value === '' || !Number.isFinite(Number(value))) return '—';
@@ -29,6 +68,46 @@ function ServiceBadge({ status, attempt, onRetry }) {
         </button>
       )}
     </div>
+  );
+}
+
+function CompanyFundamentalsStrip({ info, ticker, currencySymbol }) {
+  if (!info || info.ticker !== ticker || !info.hasAnyFundamental) return null;
+  const effectiveSymbol = info.currencySymbol || currencySymbol;
+  const marketCapText = formatCompactMarketCap(info.marketCap, {
+    currency: info.currency,
+    marketCapCurrency: info.marketCapCurrency,
+    currencySymbol: effectiveSymbol,
+    ticker,
+  });
+  const range52wText = info.fiftyTwoWeekLow != null && info.fiftyTwoWeekHigh != null
+    ? `${formatSharePrice(info.fiftyTwoWeekLow, effectiveSymbol)} – ${formatSharePrice(info.fiftyTwoWeekHigh, effectiveSymbol)}`
+    : '—';
+  const peText = info.peRatio != null && Number.isFinite(Number(info.peRatio))
+    ? `${Number(info.peRatio).toFixed(1)}×`
+    : '—';
+
+  return (
+    <section className="panel fundamentals-strip" aria-label={`${ticker} company fundamentals`}>
+      <div className="fundamentals-grid">
+        <div className="fundamental-item">
+          <span className="fundamental-label">Sector</span>
+          <strong className="fundamental-value">{info.sector || '—'}</strong>
+        </div>
+        <div className="fundamental-item">
+          <span className="fundamental-label">Market Cap</span>
+          <strong className="fundamental-value mono">{marketCapText}</strong>
+        </div>
+        <div className="fundamental-item">
+          <span className="fundamental-label">52-Week Range</span>
+          <strong className="fundamental-value mono">{range52wText}</strong>
+        </div>
+        <div className="fundamental-item">
+          <span className="fundamental-label">P/E (TTM)</span>
+          <strong className="fundamental-value mono">{peText}</strong>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -83,16 +162,20 @@ function BacktestPanel({ backtest }) {
 
 function formatNewsTimestamp(publishedAt) {
   if (!publishedAt) return '';
+  const raw = String(publishedAt).trim();
+  const isDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(raw);
   try {
-    const d = new Date(publishedAt);
-    if (Number.isNaN(d.getTime())) return String(publishedAt).slice(0, 10);
+    const d = new Date(isDateOnly ? `${raw}T00:00:00Z` : raw);
+    if (Number.isNaN(d.getTime())) return raw.slice(0, 10);
+    const datePart = d.toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      timeZone: 'UTC',
+    });
+    if (isDateOnly) return datePart;
     return (
-      d.toLocaleDateString('en-US', {
-        month: 'short',
-        day: 'numeric',
-        year: 'numeric',
-        timeZone: 'UTC',
-      }) +
+      datePart +
       ' · ' +
       d.toLocaleTimeString('en-US', {
         hour: '2-digit',
@@ -103,8 +186,32 @@ function formatNewsTimestamp(publishedAt) {
       ' UTC'
     );
   } catch {
-    return String(publishedAt).slice(0, 10);
+    return raw.slice(0, 10);
   }
+}
+
+export function isSecFilingItem(item) {
+  if (!item || typeof item !== 'object') return false;
+  if (item.kind === 'sec_filing' || item.type === 'sec_filing' || item.is_sec_filing === true) return true;
+  if (typeof item.form === 'string' && item.form.trim()) return true;
+  if (typeof item.filing_type === 'string' && item.filing_type.trim()) return true;
+  const provider = String(item.provider || '').trim().toLowerCase();
+  const source = String(item.source || '').trim().toLowerCase();
+  return provider === 'sec_edgar' || source === 'sec edgar' || source === 'sec' || source.startsWith('sec ');
+}
+
+export function resolveSecFormLabel(item) {
+  const rawForm = String(item?.form || item?.filing_type || '').trim().toUpperCase();
+  if (rawForm) {
+    return rawForm.startsWith('SEC') ? rawForm : `SEC ${rawForm}`;
+  }
+  const title = String(item?.title || item?.headline || '');
+  const formMatch = title.match(/\b(10-K|10-Q|8-K|20-F|6-K|DEF\s*14A|S-1|S-3|13F-HR|SC\s*13[DG]|FORM\s*4)\b/i);
+  if (formMatch) {
+    const normalized = formMatch[1].replace(/\s+/g, ' ').toUpperCase().replace(/^FORM\s+/, '');
+    return `SEC ${normalized}`;
+  }
+  return 'SEC Filing';
 }
 
 function resolveSentimentBadge(item) {
@@ -139,11 +246,38 @@ function formatProviderLabel(provider) {
   return provider.replace(/_/g, ' ');
 }
 
+function mergeNewsAndFilings(news) {
+  const baseItems = Array.isArray(news?.items) ? news.items : [];
+  const extraFilings = Array.isArray(news?.sec_filings)
+    ? news.sec_filings.map((filing) => ({ ...filing, kind: filing.kind || 'sec_filing' }))
+    : [];
+  if (!extraFilings.length) return baseItems;
+  const seen = new Set();
+  const combined = [];
+  for (const entry of [...baseItems, ...extraFilings]) {
+    if (!entry) continue;
+    const key = entry.id || entry.url || `${entry.title || entry.headline || ''}-${entry.published_at || entry.filing_date || ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    combined.push(entry);
+  }
+  return combined;
+}
+
 function NewsPanel({ news, ticker, loading }) {
   const [showAll, setShowAll] = useState(false);
-  const items = news?.items || [];
+  const [filterKind, setFilterKind] = useState('all'); // 'all' | 'headlines' | 'filings'
+  const items = useMemo(() => mergeNewsAndFilings(news), [news]);
+  const secCount = useMemo(() => items.filter(isSecFilingItem).length, [items]);
+  const headlineCount = items.length - secCount;
+  const effectiveFilter = secCount > 0 && headlineCount > 0 ? filterKind : 'all';
+  const filteredItems = useMemo(() => {
+    if (effectiveFilter === 'filings') return items.filter(isSecFilingItem);
+    if (effectiveFilter === 'headlines') return items.filter((item) => !isSecFilingItem(item));
+    return items;
+  }, [items, effectiveFilter]);
   const providerLabel = formatProviderLabel(news?.provider);
-  const displayedItems = showAll ? items : items.slice(0, 5);
+  const displayedItems = showAll ? filteredItems : filteredItems.slice(0, 5);
 
   return (
     <section className="panel news-panel" aria-label="Live Market Headlines">
@@ -167,29 +301,71 @@ function NewsPanel({ news, ticker, loading }) {
       </div>
 
       <p className="method-note news-top-disclosure">
-        These headlines are provided for market context only and do not affect the displayed price forecast.
+        These headlines and regulatory filings are provided for market context only and do not affect the displayed price forecast.
       </p>
+
+      {secCount > 0 && headlineCount > 0 && (
+        <div className="news-filter-bar" role="group" aria-label="Filter news and regulatory filings">
+          <button
+            type="button"
+            className={`news-filter-btn ${filterKind === 'all' ? 'active' : ''}`}
+            aria-pressed={filterKind === 'all'}
+            onClick={() => setFilterKind('all')}
+          >
+            All ({items.length})
+          </button>
+          <button
+            type="button"
+            className={`news-filter-btn ${filterKind === 'headlines' ? 'active' : ''}`}
+            aria-pressed={filterKind === 'headlines'}
+            onClick={() => setFilterKind('headlines')}
+          >
+            Headlines ({headlineCount})
+          </button>
+          <button
+            type="button"
+            className={`news-filter-btn ${filterKind === 'filings' ? 'active' : ''}`}
+            aria-pressed={filterKind === 'filings'}
+            onClick={() => setFilterKind('filings')}
+          >
+            SEC Filings ({secCount})
+          </button>
+        </div>
+      )}
 
       {loading && !items.length ? (
         <div className="news-loading-state" role="status" aria-label="Loading headlines">
           <div className="news-skeleton-pulse" />
           <span>Loading recent stories…</span>
         </div>
-      ) : items.length ? (
+      ) : filteredItems.length ? (
         <>
           <ul className="news-simple-list">
             {displayedItems.map((item, index) => {
+              const isFiling = isSecFilingItem(item);
+              const filingLabel = isFiling ? resolveSecFormLabel(item) : null;
               const sentiment = resolveSentimentBadge(item);
               const title = item.title || item.headline || 'Market Update';
-              const timestamp = formatNewsTimestamp(item.published_at);
+              const rawDate = item.published_at || item.filing_date || '';
+              const timestamp = formatNewsTimestamp(rawDate);
+              const sourceLabel = item.source || (isFiling ? 'SEC EDGAR' : 'Market Wire');
               return (
-                <li key={`${item.published_at || ''}-${item.id || index}`} className="news-list-item">
+                <li
+                  key={`${rawDate}-${item.id || index}`}
+                  className={`news-list-item ${isFiling ? 'sec-filing-item' : ''}`}
+                >
                   <div className="news-item-meta">
-                    <span className="news-source">{item.source || 'Market Wire'}</span>
-                    {timestamp && <time className="news-time" dateTime={item.published_at}>{timestamp}</time>}
-                    <span className={`sentiment-badge ${sentiment.type}`}>
-                      {sentiment.label}
-                    </span>
+                    <span className="news-source">{sourceLabel}</span>
+                    {timestamp && <time className="news-time" dateTime={rawDate}>{timestamp}</time>}
+                    {isFiling ? (
+                      <span className="sec-filing-badge">
+                        {filingLabel}
+                      </span>
+                    ) : (
+                      <span className={`sentiment-badge ${sentiment.type}`}>
+                        {sentiment.label}
+                      </span>
+                    )}
                   </div>
                   <h3 className="news-item-headline">
                     {item.url ? (
@@ -205,13 +381,13 @@ function NewsPanel({ news, ticker, loading }) {
             })}
           </ul>
 
-          {items.length > 5 && (
+          {filteredItems.length > 5 && (
             <button
               type="button"
               className="show-more-news-btn"
               onClick={() => setShowAll((prev) => !prev)}
             >
-              {showAll ? 'Show fewer stories' : `Show more stories (${items.length - 5} more)`}
+              {showAll ? 'Show fewer stories' : `Show more stories (${filteredItems.length - 5} more)`}
             </button>
           )}
         </>
@@ -223,10 +399,15 @@ function NewsPanel({ news, ticker, loading }) {
 }
 
 export default function App() {
-  const [inputTicker, setInputTicker] = useState('');
+  const initialDeepLink = useMemo(
+    () => parseDeepLinkSearch(typeof window !== 'undefined' ? window.location.search : ''),
+    [],
+  );
+  const [inputTicker, setInputTicker] = useState(initialDeepLink.ticker || '');
   const [submittedTicker, setSubmittedTicker] = useState('');
   const [chartTicker, setChartTicker] = useState(null);
-  const [activeTab, setActiveTab] = useState('overview'); // 'overview' | 'news' | 'performance'
+  const [selectedRange, setSelectedRange] = useState(initialDeepLink.range);
+  const [activeTab, setActiveTab] = useState(initialDeepLink.tab); // 'overview' | 'news' | 'performance'
   const [serviceStatus, setServiceStatus] = useState('checking');
   const [wakeAttempt, setWakeAttempt] = useState(1);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -234,6 +415,7 @@ export default function App() {
   const [forecast, setForecast] = useState(null);
   const [news, setNews] = useState(null);
   const [newsLoading, setNewsLoading] = useState(false);
+  const [stockInfo, setStockInfo] = useState(null);
   const [inputError, setInputError] = useState('');
   const [historyError, setHistoryError] = useState('');
   const [forecastError, setForecastError] = useState('');
@@ -249,6 +431,12 @@ export default function App() {
   const perfT0 = useRef(0);
   const marketHistoryRef = useRef(marketHistory);
   marketHistoryRef.current = marketHistory;
+  const submittedTickerRef = useRef(submittedTicker);
+  submittedTickerRef.current = submittedTicker;
+  const selectedRangeRef = useRef(selectedRange);
+  selectedRangeRef.current = selectedRange;
+  const activeTabRef = useRef(activeTab);
+  activeTabRef.current = activeTab;
 
   const wake = useCallback(async () => {
     wakeController.current?.abort();
@@ -288,7 +476,10 @@ export default function App() {
     setPerf((prev) => ({ ...(prev || {}), chartMs, fetchMs: report?.fetchMs ?? null, cacheLabel, degraded: Boolean(report?.degraded) }));
   }, [nowMs]);
 
-  const runForecast = useCallback(async (eventOrSymbol, { forceRefresh = false } = {}) => {
+  const runForecast = useCallback(async (
+    eventOrSymbol,
+    { forceRefresh = false, skipPushState = false, initialRange, initialTab } = {},
+  ) => {
     if (eventOrSymbol && typeof eventOrSymbol.preventDefault === 'function') {
       eventOrSymbol.preventDefault();
     }
@@ -305,7 +496,33 @@ export default function App() {
       return;
     }
 
+    const nextRange = initialRange !== undefined ? initialRange : selectedRangeRef.current;
+    const nextTab = initialTab !== undefined ? initialTab : activeTabRef.current;
+    if (initialRange !== undefined) {
+      setSelectedRange(initialRange);
+      selectedRangeRef.current = initialRange;
+    }
+    if (initialTab !== undefined) {
+      setActiveTab(initialTab);
+      activeTabRef.current = initialTab;
+    }
+
     setInputTicker(symbol);
+    if (!skipPushState && !forceRefresh && typeof window !== 'undefined' && typeof window.history?.pushState === 'function') {
+      const targetUrl = buildDeepLinkUrl({
+        ticker: symbol,
+        range: nextRange || '1M',
+        tab: nextTab || 'overview',
+      });
+      if (`${window.location.pathname}${window.location.search}` !== targetUrl) {
+        window.history.pushState(
+          { ticker: symbol, range: nextRange || '1M', tab: nextTab || 'overview' },
+          '',
+          targetUrl,
+        );
+      }
+    }
+
     if (forceRefresh) {
       setRefreshToken((value) => value + 1);
     }
@@ -324,11 +541,13 @@ export default function App() {
     if (!isSameTicker) {
       setChartTicker(null);
       setMarketHistory(null);
+      setStockInfo(null);
     }
     setForecast(null);
     setNews(null);
     setPerf(null);
     setSubmittedTicker(symbol);
+    submittedTickerRef.current = symbol;
     setHistoryLoading(true);
     setForecastLoading(true);
     setNewsLoading(true);
@@ -419,6 +638,15 @@ export default function App() {
         return null;
       });
 
+    // 4. Lazy non-blocking company fundamentals request (/api/v1/info)
+    const infoPromise = fetchStockInfo(symbol, { signal: controller.signal, forceRefresh })
+      .then((infoResult) => {
+        if (requestSeq.current !== seq) return null;
+        setStockInfo(infoResult);
+        return infoResult;
+      })
+      .catch(() => null);
+
     await Promise.allSettled([historyPromise, forecastPromise]);
     if (requestSeq.current !== seq) return;
     setHistoryLoading(false);
@@ -427,12 +655,106 @@ export default function App() {
     if (!historyUsable && !fallbackAvailable) {
       setHistoryError(historyFailureMessage || 'Price history is unavailable for this stock right now.');
     }
-    await newsPromise;
+    await Promise.allSettled([newsPromise, infoPromise]);
   }, [inputTicker, nowMs, serviceStatus, chartTicker]);
+
+  const runForecastRef = useRef(runForecast);
+  runForecastRef.current = runForecast;
+
+  // Hydrate initial URL deep link on mount (?ticker=MSFT&range=1M&tab=overview)
+  useEffect(() => {
+    if (initialDeepLink.ticker) {
+      runForecastRef.current(initialDeepLink.ticker, {
+        skipPushState: true,
+        initialRange: initialDeepLink.range,
+        initialTab: initialDeepLink.tab,
+      });
+    }
+  }, [initialDeepLink]);
+
+  // Browser Back / Forward navigation via popstate
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const onPopState = () => {
+      const parsed = parseDeepLinkSearch(window.location.search);
+      setActiveTab(parsed.tab);
+      activeTabRef.current = parsed.tab;
+      setSelectedRange(parsed.range);
+      selectedRangeRef.current = parsed.range;
+
+      if (parsed.ticker) {
+        if (parsed.ticker !== submittedTickerRef.current) {
+          runForecastRef.current(parsed.ticker, {
+            skipPushState: true,
+            initialRange: parsed.range,
+            initialTab: parsed.tab,
+          });
+        } else {
+          setInputTicker(parsed.ticker);
+        }
+      } else {
+        requestController.current?.abort();
+        requestSeq.current += 1;
+        setInputTicker('');
+        setSubmittedTicker('');
+        submittedTickerRef.current = '';
+        setChartTicker(null);
+        setMarketHistory(null);
+        setForecast(null);
+        setNews(null);
+        setStockInfo(null);
+        setPerf(null);
+        setInputError('');
+        setHistoryError('');
+        setForecastError('');
+        setHistoryLoading(false);
+        setForecastLoading(false);
+        setNewsLoading(false);
+      }
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
+  const selectTab = useCallback((nextTab) => {
+    setActiveTab(nextTab);
+    activeTabRef.current = nextTab;
+    const currentSymbol = submittedTickerRef.current;
+    if (currentSymbol && typeof window !== 'undefined' && typeof window.history?.replaceState === 'function') {
+      const targetUrl = buildDeepLinkUrl({
+        ticker: currentSymbol,
+        range: selectedRangeRef.current || '1M',
+        tab: nextTab,
+      });
+      window.history.replaceState(
+        { ticker: currentSymbol, range: selectedRangeRef.current || '1M', tab: nextTab },
+        '',
+        targetUrl,
+      );
+    }
+  }, []);
+
+  const handleRangeChange = useCallback((nextRange) => {
+    setSelectedRange(nextRange);
+    selectedRangeRef.current = nextRange;
+    const currentSymbol = submittedTickerRef.current;
+    if (currentSymbol && nextRange && typeof window !== 'undefined' && typeof window.history?.replaceState === 'function') {
+      const targetUrl = buildDeepLinkUrl({
+        ticker: currentSymbol,
+        range: nextRange,
+        tab: activeTabRef.current || 'overview',
+      });
+      window.history.replaceState(
+        { ticker: currentSymbol, range: nextRange, tab: activeTabRef.current || 'overview' },
+        '',
+        targetUrl,
+      );
+    }
+  }, []);
 
   const handleRetry = useCallback(() => {
     if (submittedTicker) {
-      runForecast(submittedTicker, { forceRefresh: true });
+      runForecast(submittedTicker, { forceRefresh: true, skipPushState: true });
     }
   }, [runForecast, submittedTicker]);
 
@@ -462,9 +784,21 @@ export default function App() {
         ? forecast.currency_symbol
         : (marketHistory?.ticker === chartTicker && marketHistory?.currencySymbol
           ? marketHistory.currencySymbol
-          : (chartTicker.endsWith('.L') ? 'p' : '$'))
+          : (stockInfo?.ticker === chartTicker && stockInfo?.currencySymbol
+            ? stockInfo.currencySymbol
+            : (chartTicker.endsWith('.L') ? 'p' : '$')))
     )
     : '$';
+
+  const resolvedCompanyName = chartTicker
+    ? (
+      (forecast?.ticker === chartTicker && forecast?.ticker_name)
+      || (stockInfo?.ticker === chartTicker && stockInfo?.name)
+      || null
+    )
+    : null;
+
+  const totalNewsCount = useMemo(() => mergeNewsAndFilings(news).length, [news]);
 
   return (
     <div className="app-shell">
@@ -498,9 +832,13 @@ export default function App() {
             <div className="search-input-row">
               <div className="input-field-group">
                 <label htmlFor="tickerInput" className="sr-only">Stock ticker</label>
-                <StockAutocomplete value={inputTicker}
+                <StockAutocomplete
+                  value={inputTicker}
                   onChange={(value) => { setInputTicker(value); if (inputError) setInputError(''); }}
-                  onSelect={(symbol) => runForecast(symbol)} invalid={Boolean(inputError)} errorId={inputError ? 'symbolError' : undefined} />
+                  onSelect={(symbol) => runForecast(symbol)}
+                  invalid={Boolean(inputError)}
+                  errorId={inputError ? 'symbolError' : undefined}
+                />
                 {inputError && (
                   <span id="symbolError" className="symbol-feedback" role="alert">
                     {inputError}
@@ -556,16 +894,21 @@ export default function App() {
               historyLoading={historyLoading}
               historyError={historyError}
               onRetryHistory={handleRetry}
+              selectedRange={selectedRange}
+              onRangeChange={handleRangeChange}
               currencySymbol={resolvedCurrencySymbol}
               forecast={forecast?.ticker === chartTicker ? forecast : null}
-              companyName={forecast?.ticker === chartTicker ? forecast.ticker_name : null}
+              companyName={resolvedCompanyName}
               onHistorySettled={handleHistorySettled}
               onRetryForecast={handleRetry}
             />
 
             {/* Supporting Information Behind Overview / News / Performance Tabs */}
             <div className="supporting-tabs-container">
-              <div className="tab-navigation-bar" role="tablist" aria-label="Supporting information tabs"
+              <div
+                className="tab-navigation-bar"
+                role="tablist"
+                aria-label="Supporting information tabs"
                 onKeyDown={(event) => {
                   const keys = ['ArrowRight', 'ArrowLeft', 'Home', 'End'];
                   if (!keys.includes(event.key)) return;
@@ -574,9 +917,10 @@ export default function App() {
                   const index = tabs.indexOf(activeTab);
                   const next = event.key === 'Home' ? 0 : event.key === 'End' ? 2
                     : (index + (event.key === 'ArrowRight' ? 1 : 2)) % 3;
-                  setActiveTab(tabs[next]);
+                  selectTab(tabs[next]);
                   document.getElementById(`tab-${tabs[next]}`)?.focus();
-                }}>
+                }}
+              >
                 <button
                   type="button"
                   role="tab"
@@ -585,7 +929,7 @@ export default function App() {
                   aria-selected={activeTab === 'overview'}
                   aria-controls="panel-overview"
                   className={`sub-tab-btn ${activeTab === 'overview' ? 'active' : ''}`}
-                  onClick={() => setActiveTab('overview')}
+                  onClick={() => selectTab('overview')}
                 >
                   Overview
                 </button>
@@ -597,9 +941,9 @@ export default function App() {
                   aria-selected={activeTab === 'news'}
                   aria-controls="panel-news"
                   className={`sub-tab-btn ${activeTab === 'news' ? 'active' : ''}`}
-                  onClick={() => setActiveTab('news')}
+                  onClick={() => selectTab('news')}
                 >
-                  News{news?.items?.length ? ` (${news.items.length})` : ''}
+                  News{totalNewsCount ? ` (${totalNewsCount})` : ''}
                 </button>
                 <button
                   type="button"
@@ -609,13 +953,18 @@ export default function App() {
                   aria-selected={activeTab === 'performance'}
                   aria-controls="panel-performance"
                   className={`sub-tab-btn ${activeTab === 'performance' ? 'active' : ''}`}
-                  onClick={() => setActiveTab('performance')}
+                  onClick={() => selectTab('performance')}
                 >
                   Performance
                 </button>
               </div>
 
               <div id="panel-overview" role="tabpanel" aria-labelledby="tab-overview" hidden={activeTab !== 'overview'}>
+                <CompanyFundamentalsStrip
+                  info={stockInfo}
+                  ticker={chartTicker}
+                  currencySymbol={resolvedCurrencySymbol}
+                />
                 <VolatilityOutlook
                   refreshToken={refreshToken}
                   expectedIdentity={marketHistory || forecast}

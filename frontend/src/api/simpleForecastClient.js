@@ -154,7 +154,7 @@ export async function fetchTickerNews(ticker, { signal, forceRefresh = false } =
       timeoutMs: 15_000,
       cache: forceRefresh ? 'no-cache' : undefined,
     });
-    if (Array.isArray(res?.items)) {
+    if (Array.isArray(res?.items) || Array.isArray(res?.sec_filings)) {
       return assertTickerIdentity(res, symbol);
     }
   } catch (error) {
