@@ -107,5 +107,6 @@ def news(
             secret_key=settings.alpaca_api_secret_key,
             base_url=settings.alpaca_data_base_url,
             timeout_seconds=settings.market_data_timeout_seconds,
+            include_sec_filings=True,
         ),
     }

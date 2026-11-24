@@ -28,12 +28,17 @@ for path in (ROOT, BACKEND):
 from calendars import latest_completed_trading_session  # noqa: E402
 from services.live_collection import (  # noqa: E402
     LIVE_COLLECTION_ITEMS_V1,
-    LIVE_EXPECTED_RECORD_COUNT,
     LIVE_HORIZONS_V1,
     LIVE_MODEL_POLICY_V1,
+    LIVE_MODEL_POLICY_V2,
     LIVE_START_DATE,
     LIVE_UNIVERSE_V1,
+    LIVE_UNIVERSE_V2,
     LIVE_UNIVERSE_VERSION,
+    LIVE_UNIVERSE_VERSION_V2,
+    exchange_for_live_ticker,
+    resolve_live_cohort_items,
+    resolve_live_cohort_version,
 )
 
 FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -128,10 +133,24 @@ def collection_session(
     now: datetime,
     *,
     scheduled: bool,
+    exchange: str = "NYSE",
 ) -> tuple[str | None, str | None]:
-    """Resolve the eligible same-day completed NYSE session or a skip reason."""
+    """Resolve the eligible same-day completed NYSE or LSE session or a skip reason."""
+    ex = str(exchange).strip().upper()
+    if ex not in ("NYSE", "LSE"):
+        raise ValueError(f"Unsupported session exchange: {exchange!r}")
     instant = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
     london_now = instant.astimezone(ZoneInfo("Europe/London"))
+    if ex == "LSE":
+        if scheduled and not (london_now.hour == 17 and london_now.minute >= 15):
+            return None, "outside_17_30_europe_london_lse_window"
+        latest = latest_completed_trading_session(instant, exchange="LSE").date()
+        if latest != london_now.date():
+            return None, "no_completed_lse_session_on_london_date"
+        if latest < LIVE_START_DATE:
+            return None, "before_live_start_date"
+        return latest.isoformat(), None
+
     if scheduled and not (london_now.hour == 22 and london_now.minute >= 20):
         return None, "outside_22_30_europe_london_window"
     latest = latest_completed_trading_session(instant).date()
@@ -142,22 +161,64 @@ def collection_session(
     return latest.isoformat(), None
 
 
-def _base_manifest(run_timestamp: str, expected_session: str | None) -> dict[str, Any]:
-    return {
+def _resolve_item_session(expected_session: str | dict[str, str], ticker: str) -> str:
+    if isinstance(expected_session, dict):
+        return str(expected_session.get(exchange_for_live_ticker(ticker), ""))
+    return str(expected_session)
+
+
+def _base_manifest(
+    run_timestamp: str,
+    expected_session: str | dict[str, str] | None,
+    *,
+    cohort: str = "v1",
+    exchange: str = "ALL",
+    items: tuple[tuple[str, int], ...] | None = None,
+    batch_size: int | None = None,
+    batch_index: int = 0,
+) -> dict[str, Any]:
+    cohort_version = resolve_live_cohort_version(cohort)
+    resolved_items = (
+        tuple(items)
+        if items is not None
+        else resolve_live_cohort_items(
+            cohort_version,
+            exchange=exchange,
+            batch_size=batch_size,
+            batch_index=batch_index,
+        )
+    )
+    tickers = list(dict.fromkeys(ticker for ticker, _ in resolved_items))
+    horizons = list(dict.fromkeys(horizon for _, horizon in resolved_items)) or list(
+        LIVE_HORIZONS_V1
+    )
+    primary_session = (
+        expected_session.get("NYSE") or next(iter(expected_session.values()), None)
+        if isinstance(expected_session, dict)
+        else expected_session
+    )
+    manifest: dict[str, Any] = {
         "run_timestamp": run_timestamp,
-        "expected_nyse_session": expected_session,
-        "universe_version": LIVE_UNIVERSE_VERSION,
+        "expected_nyse_session": primary_session,
+        "universe_version": cohort_version,
+        "cohort": cohort,
+        "exchange": str(exchange).strip().upper(),
+        "batch_size": batch_size,
+        "batch_index": batch_index,
         "live_start_date": LIVE_START_DATE.isoformat(),
-        "tickers": list(LIVE_UNIVERSE_V1),
-        "ticker_count": len(LIVE_UNIVERSE_V1),
-        "horizons": list(LIVE_HORIZONS_V1),
-        "expected_record_count": LIVE_EXPECTED_RECORD_COUNT,
+        "tickers": tickers,
+        "ticker_count": len(tickers),
+        "horizons": horizons,
+        "expected_record_count": len(resolved_items),
         "succeeded_count": 0,
         "failed_count": 0,
         "items": [],
         "deployed_code_commit": None,
         "batch_status": "aborted",
     }
+    if isinstance(expected_session, dict):
+        manifest["expected_sessions"] = dict(expected_session)
+    return manifest
 
 
 def _validate_preview(
@@ -167,17 +228,21 @@ def _validate_preview(
     expected_session: str,
     *,
     expected_ledger_write: str = "disabled_public_preview",
+    cohort_version: str = LIVE_UNIVERSE_VERSION,
 ) -> list[str]:
     errors: list[str] = []
     forecast = payload.get("forecast") if isinstance(payload.get("forecast"), dict) else {}
     evidence = payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
+    policy_map = (
+        LIVE_MODEL_POLICY_V2 if cohort_version == LIVE_UNIVERSE_VERSION_V2 else LIVE_MODEL_POLICY_V1
+    )
     if payload.get("ticker") != ticker:
         errors.append("ticker_mismatch")
     if payload.get("horizon") != horizon:
         errors.append("horizon_mismatch")
     if evidence.get("data_as_of") != expected_session:
         errors.append("data_as_of_mismatch")
-    if forecast.get("model") != LIVE_MODEL_POLICY_V1[horizon]:
+    if forecast.get("model") != policy_map[horizon]:
         errors.append("model_policy_mismatch")
     if evidence.get("ledger_write") != expected_ledger_write:
         errors.append("ledger_write_status_mismatch")
@@ -234,13 +299,42 @@ def _readiness_errors(
 def run_preflight(
     client: CollectorClient,
     *,
-    expected_session: str,
+    expected_session: str | dict[str, str],
     run_timestamp: str,
     interval_seconds: float,
+    cohort: str = "v1",
+    exchange: str = "ALL",
+    batch_size: int | None = None,
+    batch_index: int = 0,
+    items: tuple[tuple[str, int], ...] | None = None,
 ) -> dict[str, Any]:
-    """Preview all 60 combinations and write nothing."""
+    """Preview all selected cohort/batch combinations and write nothing."""
+    cohort_version = resolve_live_cohort_version(cohort)
+    selected_items = (
+        tuple(items)
+        if items is not None
+        else resolve_live_cohort_items(
+            cohort_version,
+            exchange=exchange,
+            batch_size=batch_size,
+            batch_index=batch_index,
+        )
+    )
+    manifest = _base_manifest(
+        run_timestamp,
+        expected_session,
+        cohort=cohort,
+        exchange=exchange,
+        items=selected_items,
+        batch_size=batch_size,
+        batch_index=batch_index,
+    )
+    if not selected_items:
+        manifest["abort_reason"] = "empty_batch_slice"
+        manifest["batch_errors"] = ["empty_batch_slice"]
+        return manifest
+
     initial_ready = client.request("GET", "/ready", attempts=1)
-    manifest = _base_manifest(run_timestamp, expected_session)
     initial_readiness_errors = _readiness_errors(
         initial_ready.payload, allow_market_cold=True, status_code=initial_ready.status_code
     )
@@ -249,9 +343,14 @@ def run_preflight(
         manifest["batch_errors"] = initial_readiness_errors
         return manifest
 
+    policy_map = (
+        LIVE_MODEL_POLICY_V2 if cohort_version == LIVE_UNIVERSE_VERSION_V2 else LIVE_MODEL_POLICY_V1
+    )
+    total_items = len(selected_items)
     commits: set[str] = set()
-    for index, (ticker, horizon) in enumerate(LIVE_COLLECTION_ITEMS_V1):
-        pinned_model = LIVE_MODEL_POLICY_V1[horizon]
+    for index, (ticker, horizon) in enumerate(selected_items):
+        pinned_model = policy_map[horizon]
+        item_session = _resolve_item_session(expected_session, ticker)
         response = client.request(
             "GET",
             "/api/v1/volatility/forecast",
@@ -259,7 +358,13 @@ def run_preflight(
         )
         evidence = response.payload.get("evidence", {})
         errors = (
-            _validate_preview(response.payload, ticker, horizon, expected_session)
+            _validate_preview(
+                response.payload,
+                ticker,
+                horizon,
+                item_session,
+                cohort_version=cohort_version,
+            )
             if response.status_code == 200
             else [f"http_{response.status_code}"]
         )
@@ -281,10 +386,10 @@ def run_preflight(
         )
         status_label = "preview_passed" if not errors else f"preview_failed: {','.join(errors)}"
         print(
-            f"[PREFLIGHT {index + 1}/{LIVE_EXPECTED_RECORD_COUNT}] {ticker} h={horizon} -> HTTP {response.status_code} ({status_label})",
+            f"[PREFLIGHT {index + 1}/{total_items}] {ticker} h={horizon} -> HTTP {response.status_code} ({status_label})",
             flush=True,
         )
-        if interval_seconds and index + 1 < LIVE_EXPECTED_RECORD_COUNT:
+        if interval_seconds and index + 1 < total_items:
             time.sleep(interval_seconds)
 
     final_ready = client.request("GET", "/ready", attempts=1)
@@ -295,7 +400,7 @@ def run_preflight(
         final_readiness_errors.append("final_readiness_not_ready")
 
     failures = sum(bool(item["errors"]) for item in manifest["items"])
-    manifest["succeeded_count"] = LIVE_EXPECTED_RECORD_COUNT - failures
+    manifest["succeeded_count"] = total_items - failures
     manifest["failed_count"] = failures
     manifest["batch_errors"] = list(dict.fromkeys(final_readiness_errors))
     if final_readiness_errors:
@@ -320,6 +425,7 @@ def run_live_collection(
     *,
     token: str,
     interval_seconds: float,
+    items: tuple[tuple[str, int], ...] | None = None,
 ) -> dict[str, Any]:
     """Record the frozen batch only after a complete validated preflight."""
     manifest = json.loads(json.dumps(preflight))
@@ -328,27 +434,45 @@ def run_live_collection(
         manifest["abort_reason"] = "preflight_not_complete"
         return manifest
 
-    preview_by_item = {
-        (item["ticker"], item["horizon"]): item for item in preflight.get("items", [])
-    }
+    cohort_version = str(preflight.get("universe_version") or LIVE_UNIVERSE_VERSION)
+    preview_items = preflight.get("items", [])
+    preview_by_item = {(item["ticker"], int(item["horizon"])): item for item in preview_items}
+    selected_items = (
+        tuple(items)
+        if items is not None
+        else (
+            tuple((str(item["ticker"]), int(item["horizon"])) for item in preview_items)
+            if preview_items
+            else LIVE_COLLECTION_ITEMS_V1
+        )
+    )
+    expected_session: str | dict[str, str] = (
+        preflight.get("expected_sessions") or preflight["expected_nyse_session"]
+    )
+    total_items = len(selected_items)
     live_items: list[dict[str, Any]] = []
-    for index, (ticker, horizon) in enumerate(LIVE_COLLECTION_ITEMS_V1):
+    for index, (ticker, horizon) in enumerate(selected_items):
+        collect_params: dict[str, Any] = {"ticker": ticker, "horizon": horizon}
+        if cohort_version != LIVE_UNIVERSE_VERSION:
+            collect_params["cohort"] = cohort_version
         response = client.request(
             "POST",
             "/api/v1/volatility/collect",
-            params={"ticker": ticker, "horizon": horizon},
+            params=collect_params,
             token=token,
         )
         evidence = response.payload.get("evidence", {})
         returned_fingerprint = evidence.get("forecast_fingerprint")
         expected_fingerprint = preview_by_item[(ticker, horizon)].get("forecast_fingerprint")
+        item_session = _resolve_item_session(expected_session, ticker)
         errors = (
             _validate_preview(
                 response.payload,
                 ticker,
                 horizon,
-                preflight["expected_nyse_session"],
+                item_session,
                 expected_ledger_write="recorded_live",
+                cohort_version=cohort_version,
             )
             if response.status_code == 200
             else []
@@ -380,30 +504,55 @@ def run_live_collection(
         )
         status_label = "recorded" if not errors else f"failed: {','.join(errors)}"
         print(
-            f"[LIVE WRITE {index + 1}/{LIVE_EXPECTED_RECORD_COUNT}] {ticker} h={horizon} -> HTTP {response.status_code} ({status_label})",
+            f"[LIVE WRITE {index + 1}/{total_items}] {ticker} h={horizon} -> HTTP {response.status_code} ({status_label})",
             flush=True,
         )
-        if interval_seconds and index + 1 < LIVE_EXPECTED_RECORD_COUNT:
+        if interval_seconds and index + 1 < total_items:
             time.sleep(interval_seconds)
 
     succeeded = sum(item["status"] == "recorded" for item in live_items)
     manifest["items"] = live_items
     manifest["succeeded_count"] = succeeded
-    manifest["failed_count"] = LIVE_EXPECTED_RECORD_COUNT - succeeded
-    manifest["batch_status"] = "complete" if succeeded == LIVE_EXPECTED_RECORD_COUNT else "partial"
+    manifest["failed_count"] = total_items - succeeded
+    manifest["batch_status"] = "complete" if succeeded == total_items else "partial"
     return manifest
 
 
 def run_settlement(
-    client: CollectorClient, *, token: str, previous: dict[str, Any] | None = None
+    client: CollectorClient,
+    *,
+    token: str,
+    previous: dict[str, Any] | None = None,
+    cohort: str = "v1",
+    exchange: str = "ALL",
+    batch_size: int | None = None,
+    batch_index: int = 0,
 ) -> dict[str, Any]:
+    cohort_version = resolve_live_cohort_version(cohort)
+    universe = LIVE_UNIVERSE_V1 if cohort_version == LIVE_UNIVERSE_VERSION else LIVE_UNIVERSE_V2
+    ex = str(exchange).strip().upper()
+    if ex not in ("ALL", "NYSE", "LSE"):
+        raise ValueError(f"Unsupported collection exchange filter: {exchange!r}")
+    tickers = (
+        tuple(t for t in universe if exchange_for_live_ticker(t) == ex) if ex != "ALL" else universe
+    )
+    if batch_size is not None:
+        size = int(batch_size)
+        idx = int(batch_index)
+        if size < 1:
+            raise ValueError("batch_size must be >= 1")
+        if idx < 0:
+            raise ValueError("batch_index must be >= 0")
+        start = idx * size
+        tickers = tickers[start : start + size]
+
     items: list[dict[str, Any]] = []
     completed = {
         item["ticker"]: item
         for item in (previous or {}).get("items", [])
         if item.get("status") == "succeeded"
     }
-    for ticker in LIVE_UNIVERSE_V1:
+    for ticker in tickers:
         if ticker in completed:
             items.append(completed[ticker])
             continue
@@ -427,7 +576,11 @@ def run_settlement(
     return {
         "operation": "settlement",
         "run_timestamp": datetime.now(UTC).isoformat(),
-        "universe_version": LIVE_UNIVERSE_VERSION,
+        "universe_version": cohort_version,
+        "cohort": cohort,
+        "exchange": ex,
+        "batch_size": batch_size,
+        "batch_index": batch_index,
         "items": items,
         "status": "complete" if all(item["status"] == "succeeded" for item in items) else "partial",
     }
@@ -489,31 +642,70 @@ def export_live_ledger(client: CollectorClient, *, token: str, output_dir: Path)
     return {"operation": "export", "status": "complete", "records": len(entries)}
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", required=True)
     parser.add_argument(
         "--mode", choices=("dry-run", "live", "settle", "export"), default="dry-run"
     )
+    parser.add_argument("--cohort", choices=("v1", "v2"), default="v1")
+    parser.add_argument("--exchange", choices=("ALL", "NYSE", "LSE"), default="ALL")
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--batch-index", type=int, default=0)
     parser.add_argument("--scheduled", action="store_true")
     parser.add_argument("--resume-manifest", type=Path, default=None)
     parser.add_argument("--interval-seconds", type=float, default=2.3)
     parser.add_argument("--timeout-seconds", type=float, default=60.0)
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts/live-collection"))
     parser.add_argument("--expected-session", default=None)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     now = datetime.now(UTC)
     run_timestamp = now.isoformat()
-    expected_session = args.expected_session
+    selected_items = resolve_live_cohort_items(
+        args.cohort,
+        exchange=args.exchange,
+        batch_size=args.batch_size,
+        batch_index=args.batch_index,
+    )
+    exchanges_present = sorted({exchange_for_live_ticker(ticker) for ticker, _ in selected_items})
+    expected_session: str | dict[str, str] | None = args.expected_session
     skip_reason = None
+    if args.mode in {"dry-run", "live"} and not selected_items:
+        skip_reason = "empty_batch_slice"
+        expected_session = None
+    elif args.mode in {"dry-run", "live"} and expected_session is None:
+        if len(exchanges_present) == 1:
+            expected_session, skip_reason = collection_session(
+                now, scheduled=args.scheduled, exchange=exchanges_present[0]
+            )
+        else:
+            resolved_map: dict[str, str] = {}
+            for ex in exchanges_present:
+                ex_session, ex_skip = collection_session(
+                    now,
+                    scheduled=(args.scheduled and ex == "NYSE"),
+                    exchange=ex,
+                )
+                if ex_session is None:
+                    skip_reason = ex_skip
+                    resolved_map = {}
+                    break
+                resolved_map[ex] = ex_session
+            expected_session = resolved_map or None
     if args.mode in {"dry-run", "live"} and expected_session is None:
-        expected_session, skip_reason = collection_session(now, scheduled=args.scheduled)
-    if args.mode in {"dry-run", "live"} and expected_session is None:
-        manifest = _base_manifest(run_timestamp, None)
+        manifest = _base_manifest(
+            run_timestamp,
+            None,
+            cohort=args.cohort,
+            exchange=args.exchange,
+            items=selected_items,
+            batch_size=args.batch_size,
+            batch_index=args.batch_index,
+        )
         manifest.update({"batch_status": "aborted", "abort_reason": skip_reason})
         output = write_manifest(manifest, args.output_dir)
         print(json.dumps({"manifest": str(output), "status": "aborted", "reason": skip_reason}))
@@ -524,13 +716,18 @@ def main() -> int:
         if args.mode in {"dry-run", "live"}:
             preflight = run_preflight(
                 client,
-                expected_session=str(expected_session),
+                expected_session=expected_session if expected_session is not None else "",
                 run_timestamp=run_timestamp,
                 interval_seconds=args.interval_seconds,
+                cohort=args.cohort,
+                exchange=args.exchange,
+                batch_size=args.batch_size,
+                batch_index=args.batch_index,
+                items=selected_items,
             )
             result = preflight
             if args.mode == "live":
-                token = os.getenv(COLLECTOR_TOKEN_ENV, "")
+                token = _collector_token() or ""
                 if not token:
                     result = dict(preflight)
                     result.update(
@@ -542,13 +739,14 @@ def main() -> int:
                         preflight,
                         token=token,
                         interval_seconds=args.interval_seconds,
+                        items=selected_items,
                     )
             output = write_manifest(result, args.output_dir)
             print(json.dumps({"manifest": str(output), "status": result["batch_status"]}))
             expected_status = "dry_run_passed" if args.mode == "dry-run" else "complete"
             return 0 if result["batch_status"] == expected_status else 1
 
-        token = os.getenv(COLLECTOR_TOKEN_ENV, "")
+        token = _collector_token() or ""
         if not token:
             print(json.dumps({"status": "aborted", "reason": "collector_token_missing"}))
             return 1
@@ -556,7 +754,15 @@ def main() -> int:
             previous = (
                 json.loads(args.resume_manifest.read_text()) if args.resume_manifest else None
             )
-            result = run_settlement(client, token=token, previous=previous)
+            result = run_settlement(
+                client,
+                token=token,
+                previous=previous,
+                cohort=args.cohort,
+                exchange=args.exchange,
+                batch_size=args.batch_size,
+                batch_index=args.batch_index,
+            )
             output = write_manifest(result, args.output_dir)
             print(json.dumps({"manifest": str(output), "status": result["status"]}))
             return 0 if result["status"] == "complete" else 1

@@ -39,8 +39,11 @@ from services.forecast_ledger import (
 )
 from services.live_collection import (
     LIVE_MODEL_POLICY_V1,
+    LIVE_MODEL_POLICY_V2,
     LIVE_START_DATE,
     LIVE_UNIVERSE_VERSION,
+    LIVE_UNIVERSE_VERSION_V2,
+    resolve_live_cohort_version,
     validate_live_collection_item,
 )
 from services.live_volatility import (
@@ -238,6 +241,7 @@ def _execute_forecast(
     requested_model: str,
     *,
     record_live: bool,
+    live_universe_version: str = LIVE_UNIVERSE_VERSION,
 ) -> Any:
     try:
         allow_grace = not record_live
@@ -262,7 +266,12 @@ def _execute_forecast(
                     "message": "The market snapshot predates the frozen live collection start.",
                 },
             )
-        expected_model = LIVE_MODEL_POLICY_V1[horizon]
+        policy_map = (
+            LIVE_MODEL_POLICY_V2
+            if live_universe_version == LIVE_UNIVERSE_VERSION_V2
+            else LIVE_MODEL_POLICY_V1
+        )
+        expected_model = policy_map[horizon]
         if prepared.record_kwargs["model_name"] != expected_model:
             logger.error("Frozen model policy mismatch for %s horizon %s", symbol, horizon)
             return JSONResponse(
@@ -277,7 +286,7 @@ def _execute_forecast(
         evidence.update(
             {
                 "ledger_write": "recorded_live",
-                "live_universe_version": LIVE_UNIVERSE_VERSION,
+                "live_universe_version": live_universe_version,
                 "ledger_record_id": record.id,
             }
         )
@@ -498,16 +507,76 @@ def collect_volatility_forecast(
     _authorization: Annotated[None, Depends(require_collector_auth)],
     ticker: str = Query(min_length=1, max_length=12),
     horizon: int = Query(ge=1, le=20),
+    cohort: Literal["v1", "v2", "live_universe_v1", "live_v2_2026_11"] = Query(default="v1"),
 ) -> Any:
     """Record one authenticated item from the frozen live collection contract."""
     symbol = validate_ticker(ticker)
     try:
-        symbol, normalized_horizon = validate_live_collection_item(symbol, horizon)
+        cohort_version = resolve_live_cohort_version(cohort)
+        if cohort_version == LIVE_UNIVERSE_VERSION:
+            symbol, normalized_horizon = validate_live_collection_item(symbol, horizon)
+        else:
+            symbol, normalized_horizon = validate_live_collection_item(
+                symbol, horizon, cohort=cohort_version
+            )
     except (TypeError, ValueError) as err:
         raise HTTPException(status_code=400, detail=str(err)) from err
-    pinned_model = LIVE_MODEL_POLICY_V1[normalized_horizon]
+    policy_map = (
+        LIVE_MODEL_POLICY_V2 if cohort_version == LIVE_UNIVERSE_VERSION_V2 else LIVE_MODEL_POLICY_V1
+    )
+    pinned_model = policy_map[normalized_horizon]
     with bypass_session_cache():
-        return _execute_forecast(symbol, normalized_horizon, pinned_model, record_live=True)
+        return _execute_forecast(
+            symbol,
+            normalized_horizon,
+            pinned_model,
+            record_live=True,
+            live_universe_version=cohort_version,
+        )
+
+
+@router.get("/api/v1/volatility/ledger/summary")
+@limiter.limit("30/minute")
+def get_volatility_ledger_summary_route(
+    request: Request,
+    ticker: str | None = Query(default=None, min_length=1, max_length=12),
+    cohort: Literal["v1", "v2", "live_universe_v1", "live_v2_2026_11"] | None = Query(default=None),
+    record_source: Literal["live", "historical_replay"] | None = Query(default=None),
+    horizon: int | None = Query(default=None, ge=1, le=20),
+) -> Any:
+    """Return indexed SQL aggregate ledger summary grouped by cohort, source, horizon, policy, and settlement."""
+    symbol = validate_ticker(ticker) if ticker is not None else None
+    if horizon is not None:
+        try:
+            horizon = validate_volatility_horizon(horizon)
+        except ValueError as err:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Horizon must be one of {list(VOLATILITY_HORIZONS)}.",
+            ) from err
+    cohort_version = resolve_live_cohort_version(cohort) if cohort is not None else None
+    try:
+        ledger = get_forecast_ledger()
+        groups = ledger.get_ledger_summary(
+            ticker=symbol,
+            cohort=cohort_version,
+            record_source=record_source,
+            horizon=horizon,
+        )
+        return {
+            "ticker": symbol,
+            "cohort": cohort_version,
+            "record_source": record_source,
+            "horizon": horizon,
+            "total_groups": len(groups),
+            "groups": groups,
+        }
+    except LedgerUnavailableError:
+        logger.error("Forecast ledger unavailable while reading summary")
+        return JSONResponse(status_code=503, content=FORECAST_LEDGER_UNAVAILABLE_BODY)
+    except Exception:
+        logger.exception("Could not read forecast ledger summary")
+        return JSONResponse(status_code=503, content=FORECAST_LEDGER_UNAVAILABLE_BODY)
 
 
 @router.get("/api/v1/volatility/ledger")
@@ -647,5 +716,6 @@ __all__ = [
     "volatility_forecast",
     "volatility_forecast_batch",
     "get_volatility_ledger_route",
+    "get_volatility_ledger_summary_route",
     "score_volatility_ledger_route",
 ]

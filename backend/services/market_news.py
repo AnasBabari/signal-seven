@@ -13,9 +13,11 @@ URL, and sentiment metrics (compound, polarity breakdown, bullish/bearish badges
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import logging
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -27,8 +29,67 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 logger = logging.getLogger(__name__)
 
-_cache: TTLCache = TTLCache(maxsize=30, ttl=10 * 60)
+_cache: TTLCache = TTLCache(maxsize=256, ttl=10 * 60)
+_news_cache = _cache
+_negative_cache: TTLCache = TTLCache(maxsize=256, ttl=60)
+_cik_cache: TTLCache = TTLCache(maxsize=256, ttl=3600)
+_cik_negative_cache: TTLCache = TTLCache(maxsize=256, ttl=60)
 _lock = threading.RLock()
+
+_http_client: httpx.Client | None = None
+_http_client_lock = threading.Lock()
+
+
+class _SecRateLimiter:
+    """Thread-safe token interval limiter enforcing strictly < 10 req/s to data.sec.gov."""
+
+    def __init__(self, min_interval_seconds: float = 0.12) -> None:
+        self.min_interval_seconds = float(min_interval_seconds)
+        self._lock = threading.Lock()
+        self._last_request_monotonic: float = 0.0
+
+    def reset(self) -> None:
+        with self._lock:
+            self._last_request_monotonic = 0.0
+
+    def acquire(self, *, max_wait_seconds: float | None = None) -> bool:
+        with self._lock:
+            now = time.monotonic()
+            earliest = self._last_request_monotonic + self.min_interval_seconds
+            wait = max(0.0, earliest - now)
+            if max_wait_seconds is not None and wait > max_wait_seconds:
+                return False
+            if wait > 0:
+                time.sleep(wait)
+            self._last_request_monotonic = time.monotonic()
+            return True
+
+
+_sec_rate_limiter = _SecRateLimiter(0.12)
+
+
+def _get_http_client() -> httpx.Client:
+    global _http_client
+    with _http_client_lock:
+        if _http_client is None or _http_client.is_closed:
+            _http_client = httpx.Client(
+                timeout=4.0,
+                limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+            )
+        return _http_client
+
+
+def close_news_client() -> None:
+    """Close the shared pooled news/SEC HTTP client on application shutdown."""
+    global _http_client
+    with _http_client_lock:
+        if _http_client is not None:
+            try:
+                _http_client.close()
+            finally:
+                _http_client = None
+
+
 _sentiment = SentimentIntensityAnalyzer()
 _sentiment.lexicon.update(
     {
@@ -144,8 +205,73 @@ CIK_MAPPING: dict[str, str] = {
     "GOOGL": "0001652044",
     "GOOG": "0001652044",
     "NVDA": "0001045810",
+    "AMZN": "0001018724",
+    "META": "0001326801",
     "TSLA": "0001318605",
+    "AMD": "0000002488",
+    "COST": "0000909832",
+    "QCOM": "0000804328",
+    "JPM": "0000019617",
+    "XOM": "0002115436",
+    "WMT": "0000104169",
+    "JNJ": "0000200406",
+    "CAT": "0000018230",
+    "KO": "0000021344",
+    "NEE": "0000753308",
+    "DIS": "0001744489",
+    "BAC": "0000070858",
+    "GE": "0000040545",
+    "PLD": "0001045609",
+    "NMM": "0001415921",
+    "WBD": "0001437107",
 }
+
+_disk_cik_lock = threading.Lock()
+_disk_cik_map: dict[str, str] = {}
+_disk_cik_mtime_ns: int | None = None
+
+
+def resolve_ticker_cik(symbol: str) -> str | None:
+    """Resolve 10-digit zero-padded SEC CIK from universe_metadata.json or built-in fallback."""
+    global _disk_cik_mtime_ns
+    sym = symbol.strip().upper()
+    if sym.endswith(".L"):
+        return None
+    if sym == "WBD":
+        return "0001437107"
+    path = Path(__file__).resolve().parents[1] / "data" / "universe_metadata.json"
+    with _disk_cik_lock:
+        try:
+            st = path.stat()
+            if st.st_mtime_ns != _disk_cik_mtime_ns:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                parsed: dict[str, str] = {}
+                container = (
+                    raw.get("tickers") or raw.get("entries") or raw.get("catalog") or raw
+                    if isinstance(raw, dict)
+                    else raw
+                )
+                if isinstance(container, dict):
+                    for k, v in container.items():
+                        if isinstance(v, dict) and v.get("cik"):
+                            parsed[str(k).strip().upper()] = str(v["cik"]).strip().zfill(10)
+                elif isinstance(container, list):
+                    for item in container:
+                        if isinstance(item, dict) and item.get("ticker") and item.get("cik"):
+                            parsed[str(item["ticker"]).strip().upper()] = (
+                                str(item["cik"]).strip().zfill(10)
+                            )
+                _disk_cik_map.clear()
+                _disk_cik_map.update(parsed)
+                _disk_cik_mtime_ns = st.st_mtime_ns
+        except Exception:
+            pass
+        disk_cik = _disk_cik_map.get(sym)
+    if disk_cik:
+        return disk_cik.zfill(10)
+    fallback = CIK_MAPPING.get(sym)
+    return fallback.zfill(10) if fallback else None
+
 
 SEC_MATERIAL_FORMS = {"8-K", "8-K/A", "10-Q", "10-Q/A", "10-K", "10-K/A", "6-K"}
 
@@ -249,7 +375,8 @@ def _fetch_from_alpaca(
 ) -> list[dict[str, Any]]:
     end = datetime.now(UTC)
     start = end - timedelta(days=14)
-    response = httpx.get(
+    client = _get_http_client()
+    response = client.get(
         f"{base_url.rstrip('/')}/v1beta1/news",
         params={
             "symbols": symbol,
@@ -264,7 +391,7 @@ def _fetch_from_alpaca(
             "APCA-API-SECRET-KEY": secret_key,
             "Accept": "application/json",
         },
-        timeout=timeout_seconds,
+        timeout=max(0.1, min(float(timeout_seconds), 4.0)),
     )
     response.raise_for_status()
     payload = response.json()
@@ -366,31 +493,105 @@ def _fetch_from_yahoo(symbol: str) -> list[dict[str, Any]]:
     return items
 
 
-def _fetch_from_sec_edgar(symbol: str) -> list[dict[str, Any]]:
-    cik = CIK_MAPPING.get(symbol)
+def _format_sec_filings(
+    symbol: str, cik: str, raw_records: list[dict[str, str]]
+) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for rec in raw_records[:5]:
+        form = rec["form"]
+        acc_time = rec["published_at"]
+        acc_num = rec["accession_number"]
+        filing_date = rec["filing_date"]
+        desc = rec["description"]
+        item_detail = rec["item_detail"]
+        filing_url = rec["url"]
+
+        title = f"{symbol} Form {form}{item_detail}: {desc}"
+        summary = (
+            f"Official U.S. SEC EDGAR filing by {symbol}. Form {form}{item_detail}. "
+            f"Accession number: {acc_num}."
+        )
+        item = _format_news_item(
+            identifier=f"sec-{acc_num}" if acc_num else None,
+            title=title,
+            summary=summary,
+            source="SEC EDGAR",
+            published_at=acc_time or filing_date,
+            url=filing_url,
+            provider="sec_edgar",
+        )
+        if item is not None:
+            item["kind"] = "sec_filing"
+            item["form"] = form
+            item["filing_date"] = filing_date
+            item["cik"] = cik
+            items.append(item)
+    return items
+
+
+def _fetch_from_sec_edgar(symbol: str, *, timeout_seconds: float = 4.0) -> list[dict[str, Any]]:
+    cik = resolve_ticker_cik(symbol)
     if not cik:
         return []
+
+    with _lock:
+        cached_records = _cik_cache.get(cik)
+        if cached_records is not None:
+            return _format_sec_filings(symbol, cik, cached_records)
+        if cik in _cik_negative_cache:
+            return []
+
+    if not _sec_rate_limiter.acquire(max_wait_seconds=max(0.0, float(timeout_seconds))):
+        return []
+
+    try:
+        from config import settings
+
+        user_agent = str(
+            getattr(
+                settings, "sec_edgar_user_agent", "SignalSeven/2.0 (support@signalseven.example)"
+            )
+        ).strip()
+    except Exception:
+        user_agent = "SignalSeven/2.0 (support@signalseven.example)"
+
     url = f"https://data.sec.gov/submissions/CIK{cik}.json"
-    headers = {"User-Agent": "SignalSeven/1.0 (institutional@signalseven.terminal)"}
-    with httpx.Client(timeout=12.0, headers=headers) as client:
-        response = client.get(url)
+    headers = {"User-Agent": user_agent, "Accept": "application/json"}
+    client = _get_http_client()
+    try:
+        response = client.get(
+            url,
+            headers=headers,
+            timeout=max(0.1, min(float(timeout_seconds), 4.0)),
+        )
         response.raise_for_status()
         payload = response.json()
+    except Exception:
+        with _lock:
+            _cik_negative_cache[cik] = True
+        raise
 
-    recent = payload.get("filings", {}).get("recent", {})
+    recent = payload.get("filings", {}).get("recent", {}) if isinstance(payload, dict) else {}
     forms = recent.get("form", [])
+    filing_dates = recent.get("filingDate", [])
     acceptance_times = recent.get("acceptanceDateTime", [])
     descriptions = recent.get("primaryDocDescription", [])
     accession_numbers = recent.get("accessionNumber", [])
+    primary_docs = recent.get("primaryDocument", [])
     items_list = recent.get("items", [])
 
-    items: list[dict[str, Any]] = []
-    for i in range(min(len(forms), 40)):
+    raw_records: list[dict[str, str]] = []
+    cik_int = str(int(cik))
+    for i in range(min(len(forms), 50)):
         form = str(forms[i]).strip()
         if form not in SEC_MATERIAL_FORMS:
             continue
         acc_time = str(acceptance_times[i] if i < len(acceptance_times) else "").strip()
+        filing_date = str(filing_dates[i] if i < len(filing_dates) else "").strip()
+        if not filing_date and acc_time:
+            filing_date = acc_time[:10]
         acc_num = str(accession_numbers[i] if i < len(accession_numbers) else "").strip()
+        primary_doc = str(primary_docs[i] if i < len(primary_docs) else "").strip()
         desc = str(descriptions[i] if i < len(descriptions) else form).strip() or form
         raw_item_code = str(items_list[i] if i < len(items_list) else "").strip()
 
@@ -404,25 +605,32 @@ def _fetch_from_sec_edgar(symbol: str) -> list[dict[str, Any]]:
             if matched:
                 item_detail = f" ({', '.join(matched)})"
 
-        title = f"{symbol} Form {form}{item_detail}: {desc}"
-        summary = (
-            f"Official U.S. SEC EDGAR filing by {symbol}. Form {form}{item_detail}. "
-            f"Accession number: {acc_num}."
-        )
-        filing_url = f"https://www.sec.gov/edgar/browse/?CIK={cik}"
+        if acc_num and primary_doc:
+            acc_compact = acc_num.replace("-", "")
+            filing_url = (
+                f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_compact}/{primary_doc}"
+            )
+        else:
+            filing_url = f"https://www.sec.gov/edgar/browse/?CIK={cik}"
 
-        item = _format_news_item(
-            identifier=f"sec-{acc_num}" if acc_num else None,
-            title=title,
-            summary=summary,
-            source="U.S. SEC EDGAR",
-            published_at=acc_time,
-            url=filing_url,
-            provider="sec_edgar",
+        raw_records.append(
+            {
+                "form": form,
+                "published_at": acc_time or (f"{filing_date}T00:00:00Z" if filing_date else ""),
+                "filing_date": filing_date,
+                "accession_number": acc_num,
+                "description": desc,
+                "item_detail": item_detail,
+                "url": filing_url,
+            }
         )
-        if item is not None:
-            items.append(item)
-    return items
+        if len(raw_records) >= 5:
+            break
+
+    with _lock:
+        _cik_cache[cik] = raw_records
+        _cik_negative_cache.pop(cik, None)
+    return _format_sec_filings(symbol, cik, raw_records)
 
 
 def _fetch_from_cache(symbol: str) -> list[dict[str, Any]]:
@@ -491,42 +699,65 @@ def get_exchange_market_close(symbol: str, session_date: str | None = None) -> d
     return None
 
 
+def _call_sec_edgar(symbol: str, remaining_seconds: float) -> list[dict[str, Any]]:
+    if "timeout_seconds" in inspect.signature(_fetch_from_sec_edgar).parameters:
+        return _fetch_from_sec_edgar(symbol, timeout_seconds=remaining_seconds)
+    return _fetch_from_sec_edgar(symbol)
+
+
 def fetch_recent_news(
     ticker: str,
     *,
     key_id: str | None = None,
     secret_key: str | None = None,
     base_url: str = "https://data.alpaca.markets",
-    timeout_seconds: float = 10.0,
+    timeout_seconds: float = 4.0,
+    include_sec_filings: bool = False,
 ) -> dict[str, Any]:
-    """Fetch rich financial headlines with automatic fallback.
+    """Fetch rich financial headlines with automatic fallback and <=4.0s shared deadline.
 
     Tries Alpaca -> Yahoo Finance -> SEC EDGAR -> Cached JSONL archive.
     Returns rich headline objects with title, source, publication time,
-    summary, URL, and sentiment metrics.
+    summary, URL, sentiment metrics, and distinct ``sec_filings``.
     """
     symbol = ticker.strip().upper()
     with _lock:
         cached = _cache.get(symbol)
         if cached is not None:
             return dict(cached)
+        neg_cached = _negative_cache.get(symbol)
+        if neg_cached is not None:
+            return dict(neg_cached)
+
+    try:
+        from config import settings
+
+        configured_deadline = float(getattr(settings, "market_news_deadline_seconds", 4.0))
+    except Exception:
+        configured_deadline = 4.0
+    budget_seconds = min(float(timeout_seconds), configured_deadline)
+    deadline = time.monotonic() + max(0.05, budget_seconds)
+
+    def _remaining() -> float:
+        return max(0.0, deadline - time.monotonic())
 
     items: list[dict[str, Any]] = []
+    sec_filings: list[dict[str, Any]] = []
     provider_used = "none"
 
     # 1. Try Alpaca if credentials configured and not a foreign exchange (e.g. UK .L)
     clean_key = (key_id or "").strip()
     clean_secret = (secret_key or "").strip()
-    if clean_key and clean_secret and not symbol.endswith(".L"):
+    if clean_key and clean_secret and not symbol.endswith(".L") and _remaining() > 0.02:
         try:
-            items = _fetch_from_alpaca(symbol, clean_key, clean_secret, base_url, timeout_seconds)
+            items = _fetch_from_alpaca(symbol, clean_key, clean_secret, base_url, _remaining())
             if items:
                 provider_used = "alpaca"
         except Exception as exc:
             logger.info("Alpaca news fetch failed for %s (%s); falling back to Yahoo", symbol, exc)
 
     # 2. Try Yahoo Finance fallback
-    if not items:
+    if not items and _remaining() > 0.02:
         try:
             items = _fetch_from_yahoo(symbol)
             if items:
@@ -539,11 +770,12 @@ def fetch_recent_news(
             )
 
     # 3. Try SEC EDGAR fallback
-    if not items:
+    if not items and _remaining() > 0.02:
         try:
-            items = _fetch_from_sec_edgar(symbol)
+            items = _call_sec_edgar(symbol, _remaining())
             if items:
                 provider_used = "sec_edgar"
+                sec_filings = [dict(it) for it in items[:5]]
         except Exception as exc:
             logger.info(
                 "SEC EDGAR news fetch failed for %s (%s); falling back to cached archive",
@@ -560,10 +792,25 @@ def fetch_recent_news(
         except Exception as exc:
             logger.warning("Cache news load failed for %s: %s", symbol, exc)
 
+    # Optionally enrich US tickers with SEC EDGAR filings within the shared deadline.
+    if not sec_filings and not symbol.endswith(".L"):
+        if include_sec_filings and _remaining() > 0.05:
+            try:
+                sec_filings = _call_sec_edgar(symbol, _remaining())[:5]
+            except Exception as exc:
+                logger.info("SEC EDGAR filing enrichment skipped for %s (%s)", symbol, exc)
+        else:
+            cik = resolve_ticker_cik(symbol)
+            if cik:
+                with _lock:
+                    cached_sec = _cik_cache.get(cik)
+                if cached_sec:
+                    sec_filings = _format_sec_filings(symbol, cik, cached_sec)[:5]
+
     items.sort(key=lambda it: str(it.get("published_at") or ""), reverse=True)
 
     market_close_utc = get_exchange_market_close(symbol)
-    for it in items:
+    for it in (*items, *sec_filings):
         pub_str = str(it.get("published_at") or "")
         try:
             pub_dt = datetime.fromisoformat(pub_str.replace("Z", "+00:00")).astimezone(UTC)
@@ -575,9 +822,14 @@ def fetch_recent_news(
             it["after_market_close"] = False
             it["session_timing"] = "regular_hours"
 
+    top_items = items[:10]
+    top_filings = sec_filings[:5]
+    has_content = bool(top_items or top_filings)
     result = {
-        "status": "available" if items else "unavailable",
-        "items": items[:10],
+        "status": "available" if has_content else "unavailable",
+        "items": top_items,
+        "articles": top_items,
+        "sec_filings": top_filings,
         "role": "context_only",
         "used_by_model": False,
         "provider": provider_used,
@@ -587,10 +839,18 @@ def fetch_recent_news(
         "as_of": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
     }
     with _lock:
-        _cache[symbol] = result
+        if has_content:
+            _cache[symbol] = result
+            _negative_cache.pop(symbol, None)
+        else:
+            _negative_cache[symbol] = result
     return dict(result)
 
 
 def clear_news_cache() -> None:
     with _lock:
         _cache.clear()
+        _negative_cache.clear()
+        _cik_cache.clear()
+        _cik_negative_cache.clear()
+    _sec_rate_limiter.reset()

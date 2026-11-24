@@ -206,3 +206,89 @@ class AlpacaProvider:
             data_quality_audit=audit,
             timestamp_kind="session_label",
         )
+
+    def fetch_intraday_bars(
+        self,
+        symbol: str,
+        *,
+        timeframe: str = "15Min",
+        limit: int = 96,
+    ) -> list[dict[str, str | float]]:
+        """Fetch latest-session IEX intraday bars (requiring >= 5 finite bars)."""
+        if not self.configured:
+            raise MarketDataConfigurationError("Alpaca market-data credentials are not configured")
+        end = datetime.now(UTC)
+        start = end - timedelta(days=5)
+        params: dict[str, Any] = {
+            "timeframe": timeframe,
+            "start": start.isoformat().replace("+00:00", "Z"),
+            "end": end.isoformat().replace("+00:00", "Z"),
+            "adjustment": self.adjustment,
+            "feed": self.feed,
+            "sort": "asc",
+            "limit": max(int(limit) * 4, 200),
+        }
+        headers = {
+            "APCA-API-KEY-ID": self.key_id,
+            "APCA-API-SECRET-KEY": self.secret_key,
+            "Accept": "application/json",
+        }
+        client = self._get_client()
+        try:
+            response = client.get(
+                f"{self.base_url}/v2/stocks/{symbol}/bars",
+                params=params,
+                headers=headers,
+            )
+        except httpx.TimeoutException as err:
+            raise MarketDataTimeoutError("Alpaca intraday request timed out") from err
+        except httpx.HTTPError as err:
+            raise MarketDataServiceError("Alpaca intraday transport failed") from err
+
+        if response.status_code == 429:
+            raise MarketDataRateLimitError("Alpaca intraday rate limit exceeded")
+        if response.status_code in {400, 404, 422} and self._response_reports_unknown_symbol(
+            response
+        ):
+            raise MarketDataSymbolNotFound(f"Alpaca has no intraday data for {symbol}")
+        if response.status_code in {401, 403}:
+            raise MarketDataConfigurationError("Alpaca market-data credentials were rejected")
+        if response.status_code >= 400:
+            raise MarketDataServiceError("Alpaca intraday service is unavailable")
+        try:
+            payload = response.json()
+        except ValueError as err:
+            raise MarketDataProviderError("Alpaca returned malformed intraday JSON") from err
+
+        raw_bars = payload.get("bars") if isinstance(payload, dict) else None
+        if not isinstance(raw_bars, list) or not raw_bars:
+            return []
+
+        by_session: dict[str, list[dict[str, str | float]]] = {}
+        for item in raw_bars:
+            if not isinstance(item, dict):
+                continue
+            raw_t = item.get("t")
+            raw_c = item.get("c")
+            if not raw_t or raw_c is None:
+                continue
+            try:
+                close_val = float(raw_c)
+                ts = pd.Timestamp(str(raw_t))
+                ts = ts.tz_localize(UTC) if ts.tzinfo is None else ts.tz_convert(UTC)
+                ny_date = ts.tz_convert("America/New_York").date().isoformat()
+            except (TypeError, ValueError):
+                continue
+            if not pd.notna(close_val) or close_val <= 0 or close_val == float("inf"):
+                continue
+            by_session.setdefault(ny_date, []).append(
+                {"t": ts.isoformat().replace("+00:00", "Z"), "c": close_val}
+            )
+
+        if not by_session:
+            return []
+        latest_session = max(by_session.keys())
+        session_bars = by_session[latest_session][-int(limit) :]
+        if len(session_bars) < 5:
+            return []
+        return session_bars

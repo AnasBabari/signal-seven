@@ -108,6 +108,8 @@ class Settings(BaseSettings):
     alpaca_data_base_url: str = "https://data.alpaca.markets"
     alpaca_data_feed: Literal["iex", "sip"] = "iex"
     alpaca_adjustment: Literal["raw", "split", "dividend", "all"] = "all"
+    sec_edgar_user_agent: str = "SignalSeven/2.0 (support@signalseven.example)"
+    market_news_deadline_seconds: float = Field(default=4.0, ge=0.5, le=30.0)
 
     # Hybrid server/browser training foundation (defaults keep today's behaviour).
     server_forecast_serving_enabled: bool = False

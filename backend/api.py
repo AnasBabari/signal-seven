@@ -64,6 +64,14 @@ def _shutdown_resources() -> None:
             close_ledger()
     except Exception:
         logger.warning("Failed to close forecast ledger pool during shutdown", exc_info=True)
+    try:
+        from services import market_news
+
+        close_news = getattr(market_news, "close_news_client", None)
+        if callable(close_news):
+            close_news()
+    except Exception:
+        logger.warning("Failed to close market news HTTP client during shutdown", exc_info=True)
 
 
 # ── Application Setup ────────────────────────────────────────────────

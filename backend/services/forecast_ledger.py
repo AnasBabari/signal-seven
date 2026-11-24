@@ -196,6 +196,119 @@ _POSTGRES_TRACK_RECORD_AGG_SQL = (
     "\n            FROM forecast_ledger\n            WHERE record_source=?"
 )
 
+_LEDGER_SUMMARY_METRICS_SQL = """,
+                record_source,
+                horizon,
+                CASE
+                    WHEN LENGTH(model_version) > 20
+                     AND SUBSTR(model_version, LENGTH(model_version) - 19, 20) = ':annualized_sigma_v1'
+                    THEN SUBSTR(model_version, 1, LENGTH(model_version) - 20)
+                    ELSE model_version
+                END AS policy_version,
+                CASE
+                    WHEN LENGTH(model_version) >= 20
+                     AND SUBSTR(model_version, LENGTH(model_version) - 19, 20) = ':annualized_sigma_v1'
+                    THEN 'annualized_sigma_v1'
+                    ELSE 'legacy_unversioned'
+                END AS settlement_version,
+                COUNT(*) AS total_forecasts,
+                COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0) AS pending_forecasts,
+                COALESCE(SUM(CASE WHEN status = 'scored' THEN 1 ELSE 0 END), 0) AS scored_forecasts,
+                COUNT(DISTINCT ticker) AS distinct_tickers,
+                AVG(CASE WHEN status = 'scored' THEN abs_error END) AS mean_mae,
+                AVG(
+                    CASE
+                        WHEN status = 'scored' AND forecast_error IS NOT NULL
+                        THEN forecast_error * forecast_error
+                    END
+                ) AS mean_sq_error,
+                AVG(CASE WHEN status = 'scored' THEN qlike_loss END) AS mean_qlike,
+                COALESCE(
+                    SUM(
+                        CASE
+                            WHEN status = 'scored'
+                             AND actual_realized_volatility IS NOT NULL
+                             AND LENGTH(model_version) >= 20
+                             AND SUBSTR(model_version, LENGTH(model_version) - 19, 20) = ':annualized_sigma_v1'
+                            THEN 1 ELSE 0
+                        END
+                    ),
+                    0
+                ) AS direction_eligible_forecasts,
+                COALESCE(
+                    SUM(
+                        CASE
+                            WHEN status = 'scored'
+                             AND actual_realized_volatility IS NOT NULL
+                             AND LENGTH(model_version) >= 20
+                             AND SUBSTR(model_version, LENGTH(model_version) - 19, 20) = ':annualized_sigma_v1'
+                             AND (
+                                 ((predicted_volatility - recent_realized_volatility) >= 0
+                                  AND (actual_realized_volatility - recent_realized_volatility) >= 0)
+                                 OR
+                                 ((predicted_volatility - recent_realized_volatility) < 0
+                                  AND (actual_realized_volatility - recent_realized_volatility) < 0)
+                             )
+                            THEN 1 ELSE 0
+                        END
+                    ),
+                    0
+                ) AS direction_hits,
+                MIN(forecast_date) AS first_forecast_date,
+                MAX(forecast_date) AS last_forecast_date
+            FROM forecast_ledger
+            WHERE 1=1"""
+
+_LEDGER_SUMMARY_ALL_SQL = (
+    """
+            SELECT
+                CASE
+                    WHEN ticker IN (
+                        'MSFT','AAPL','NVDA','GOOGL','AMZN','META','JPM','XOM',
+                        'JNJ','WMT','CAT','NEE','PLD','KO','NMM'
+                    )
+                    THEN 'live_universe_v1'
+                    WHEN ticker IN (
+                        'TSLA','AMD','COST','QCOM','DIS','BAC','GE',
+                        'SHEL.L','AZN.L','HSBA.L','BP.L','ULVR.L',
+                        'GSK.L','RIO.L','BATS.L','BARC.L','DGE.L'
+                    )
+                    THEN 'live_v2_2026_11'
+                    ELSE 'other'
+                END AS cohort"""
+    + _LEDGER_SUMMARY_METRICS_SQL
+)
+
+_LEDGER_SUMMARY_V1_SQL = (
+    """
+            SELECT
+                'live_universe_v1' AS cohort"""
+    + _LEDGER_SUMMARY_METRICS_SQL
+    + """
+                AND ticker IN (
+                    'MSFT','AAPL','NVDA','GOOGL','AMZN','META','JPM','XOM',
+                    'JNJ','WMT','CAT','NEE','PLD','KO','NMM'
+                )"""
+)
+
+_LEDGER_SUMMARY_V2_SQL = (
+    """
+            SELECT
+                'live_v2_2026_11' AS cohort"""
+    + _LEDGER_SUMMARY_METRICS_SQL
+    + """
+                AND ticker IN (
+                    'AAPL','MSFT','NVDA','GOOGL','AMZN','META','TSLA','AMD','COST','QCOM',
+                    'JPM','XOM','WMT','JNJ','CAT','KO','NEE','DIS','BAC','GE',
+                    'SHEL.L','AZN.L','HSBA.L','BP.L','ULVR.L',
+                    'GSK.L','RIO.L','BATS.L','BARC.L','DGE.L'
+                )"""
+)
+
+_LEDGER_SUMMARY_GROUP_ORDER_SQL = """
+            GROUP BY 1, 2, 3, 4, 5
+            ORDER BY 1 ASC, 2 ASC, 3 ASC, 4 ASC, 5 ASC"""
+
 
 @functools.lru_cache(maxsize=1)
 def get_current_code_commit() -> str:
@@ -678,6 +791,10 @@ class ForecastLedger:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_ledger_fingerprint ON forecast_ledger(forecast_fingerprint)"
             )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ledger_summary_group "
+                "ON forecast_ledger(record_source, horizon, model_version, ticker)"
+            )
             conn.commit()
 
     def _init_postgres_db(self) -> None:
@@ -748,6 +865,10 @@ class ForecastLedger:
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_ledger_fingerprint "
                     "ON forecast_ledger(forecast_fingerprint)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_ledger_summary_group "
+                    "ON forecast_ledger(record_source, horizon, model_version, ticker)"
                 )
                 conn.commit()
         except LedgerUnavailableError:
@@ -1224,6 +1345,83 @@ class ForecastLedger:
             "live_track_record": live_metrics,
             "replay_track_record": replay_metrics,
         }
+
+    def get_ledger_summary(
+        self,
+        *,
+        ticker: str | None = None,
+        cohort: str | None = None,
+        record_source: str | None = None,
+        horizon: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Indexed SQL aggregation grouped by (cohort, record_source, horizon, policy_version, settlement_version)."""
+        if cohort is None:
+            query = _LEDGER_SUMMARY_ALL_SQL
+        else:
+            c_norm = str(cohort).strip().lower()
+            if c_norm in ("v1", "live_universe_v1"):
+                query = _LEDGER_SUMMARY_V1_SQL
+            elif c_norm in ("v2", "live_v2_2026_11"):
+                query = _LEDGER_SUMMARY_V2_SQL
+            else:
+                raise ValueError(f"Unsupported cohort filter: {cohort!r}")
+
+        params: list[Any] = []
+        if ticker:
+            query += " AND ticker=?"
+            params.append(str(ticker).strip().upper())
+        if record_source:
+            query += " AND record_source=?"
+            params.append(str(record_source).strip())
+        if horizon is not None:
+            query += " AND horizon=?"
+            params.append(int(horizon))
+        query += _LEDGER_SUMMARY_GROUP_ORDER_SQL
+
+        with self._get_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+
+        groups: list[dict[str, Any]] = []
+        for row in rows:
+            scored = int(row["scored_forecasts"] or 0)
+            elig = int(row["direction_eligible_forecasts"] or 0)
+            hits = int(row["direction_hits"] or 0)
+            mean_sq = row["mean_sq_error"]
+            groups.append(
+                {
+                    "cohort": str(row["cohort"]),
+                    "record_source": str(row["record_source"]),
+                    "horizon": int(row["horizon"]),
+                    "policy_version": str(row["policy_version"]),
+                    "settlement_version": str(row["settlement_version"]),
+                    "total_forecasts": int(row["total_forecasts"] or 0),
+                    "pending_forecasts": int(row["pending_forecasts"] or 0),
+                    "scored_forecasts": scored,
+                    "distinct_tickers": int(row["distinct_tickers"] or 0),
+                    "direction_eligible_forecasts": elig,
+                    "mean_mae": float(row["mean_mae"])
+                    if (scored and row["mean_mae"] is not None)
+                    else None,
+                    "mean_rmse": (
+                        math.sqrt(max(float(mean_sq), 0.0))
+                        if (scored and mean_sq is not None)
+                        else None
+                    ),
+                    "mean_qlike": (
+                        float(row["mean_qlike"])
+                        if (scored and row["mean_qlike"] is not None)
+                        else None
+                    ),
+                    "direction_accuracy_pct": float(hits / elig * 100.0) if elig > 0 else None,
+                    "first_forecast_date": (
+                        str(row["first_forecast_date"]) if row["first_forecast_date"] else None
+                    ),
+                    "last_forecast_date": (
+                        str(row["last_forecast_date"]) if row["last_forecast_date"] else None
+                    ),
+                }
+            )
+        return groups
 
     def export_records(self, *, record_source: str | None = None) -> list[ForecastRecord]:
         """Return a deterministic snapshot ordered by database id.
