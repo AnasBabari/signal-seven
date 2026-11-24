@@ -526,6 +526,7 @@ def stock_info(request: Request, ticker: str = "AAPL"):
         has_mock_info_attr = "info" in getattr(ticker_obj, "__dict__", {})
 
         market_cap = _finite_number(_lookup_mapping_or_attr(fast_info, "market_cap", "marketCap"))
+        shares = _finite_number(_lookup_mapping_or_attr(fast_info, "shares"))
         high_52w = _finite_number(
             _lookup_mapping_or_attr(fast_info, "year_high", "fiftyTwoWeekHigh")
         )
@@ -620,6 +621,24 @@ def stock_info(request: Request, ticker: str = "AAPL"):
                         day_low = round(day_low * 100.0, 4)
                     if prev_close is not None and 0 < prev_close < threshold:
                         prev_close = round(prev_close * 100.0, 4)
+
+            # Yahoo fast_info computes market_cap = shares * last_price without
+            # converting GBp (pence) to GBP (pounds), inflating UK market caps 100x.
+            if market_cap is not None and market_cap > 0 and upstream_currency != "GBP":
+                ref_price_gbp = (
+                    last_price if (last_price is not None and last_price > 0) else prev_close
+                )
+                if (
+                    shares is not None
+                    and shares > 0
+                    and ref_price_gbp is not None
+                    and ref_price_gbp > 0
+                ):
+                    expected_gbp = shares * (ref_price_gbp / 100.0)
+                    if market_cap > expected_gbp * 10.0:
+                        market_cap = round(market_cap / 100.0, 2)
+                elif upstream_currency in ("GBp", "GBX") and market_cap > 2_000_000_000_000.0:
+                    market_cap = round(market_cap / 100.0, 2)
 
         resolved_name = (
             info_dict.get("longName") or info_dict.get("shortName") or static_meta["name"] or ticker

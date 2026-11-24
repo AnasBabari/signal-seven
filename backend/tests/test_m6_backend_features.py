@@ -183,6 +183,39 @@ def test_info_london_gbp_mixed_and_whole_pound_normalization(
     assert azn_body["dayLow"] == pytest.approx(11710.0)
 
 
+def test_info_london_fast_info_pence_market_cap_converted_to_gbp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live yfinance fast_info returns shares * last_price in GBp (100x GBP); convert to GBP."""
+
+    class _FakeYF:
+        def Ticker(self, symbol: str) -> Any:
+            return SimpleNamespace(
+                fast_info={
+                    "currency": "GBp",
+                    "last_price": 3552.0,
+                    "previous_close": 3540.0,
+                    "shares": 5_645_167_459,
+                    "market_cap": 20_051_634_814_368.0,
+                    "year_high": 4110.0,
+                    "year_low": 2553.77,
+                }
+            )
+
+    monkeypatch.setattr(api, "yf", _FakeYF())
+
+    resp = CLIENT.get("/api/v1/info?ticker=SHEL.L")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["currency"] == "GBp"
+    assert body["currency_symbol"] == "p"
+    assert body["marketCapCurrency"] == "GBP"
+    assert body["marketCapCurrencySymbol"] == "£"
+    assert body["marketCap"] == pytest.approx(200_516_348_143.68, rel=1e-6)
+    assert body["fiftyTwoWeekHigh"] == pytest.approx(4110.0)
+    assert body["fiftyTwoWeekLow"] == pytest.approx(2553.77)
+
+
 def test_info_london_usd_overrides_cpg_and_ihg_without_pence_scaling(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
