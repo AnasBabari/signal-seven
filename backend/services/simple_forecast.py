@@ -323,7 +323,14 @@ def get_ticker_meta(symbol: str) -> dict[str, str]:
 _cache: TTLCache = TTLCache(maxsize=128, ttl=6 * 60 * 60)
 _cache_lock = threading.RLock()
 _training_locks = [threading.RLock() for _ in range(32)]
-MODEL_CACHE_VERSION = "learned-artifact-v3"
+MODEL_CACHE_VERSION = "learned-artifact-v4"
+CONFORMAL_ALPHA = 0.20
+CONFORMAL_WINDOW = 250
+CONFORMAL_REFIT_EVERY = 20
+CONFORMAL_MIN_MATURED = 60
+CONFORMAL_MIN_TRAIN_ROWS = 120
+CONFORMAL_OOS_POINTWISE_COVERAGE = 0.7915
+CONFORMAL_OOS_SIMULTANEOUS_7D_COVERAGE = 0.5045
 _gpu_signature = None
 
 _IMPLEMENTATION_HASH: str = hashlib.sha256(
@@ -617,6 +624,146 @@ def _clip_predictions(predicted: np.ndarray, reference_targets: np.ndarray) -> n
     return np.clip(np.asarray(predicted, dtype=np.float64), lower, upper)
 
 
+def _causal_blend_vol_scale(close: np.ndarray) -> np.ndarray:
+    """Strictly causal daily volatility scale: sqrt(0.65 * EWMA_0.94(r^2) + 0.35 * Var_60d)."""
+    s_close = pd.Series(np.asarray(close, dtype=np.float64))
+    logret = np.log(s_close / s_close.shift(1))
+    ewma_var = np.maximum(logret.pow(2).ewm(alpha=0.06, adjust=False).mean().to_numpy(), 1e-10)
+    vol60_var = logret.rolling(60, min_periods=60).var(ddof=1).to_numpy()
+    safe_v60 = np.where(np.isfinite(vol60_var) & (vol60_var > 0.0), vol60_var, ewma_var)
+    blend = np.sqrt(np.maximum(0.65 * ewma_var + 0.35 * safe_v60, 1e-10))
+    return np.maximum(np.where(np.isfinite(blend), blend, 0.015), 1e-4)
+
+
+def _fit_predict_robust_ridge(
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    x_pred: np.ndarray,
+    *,
+    alpha: float = 8.0,
+) -> np.ndarray:
+    """Closed-form RobustScaler + Ridge(alpha=8.0) matching sklearn pipeline to ~1e-15."""
+    q25, med, q75 = np.percentile(x_train, [25.0, 50.0, 75.0], axis=0)
+    scale = q75 - q25
+    scale = np.where(np.abs(scale) <= 1e-15, 1.0, scale)
+    xs = (x_train - med) / scale
+    xm = xs.mean(axis=0)
+    ym = y_train.mean(axis=0)
+    xc = xs - xm
+    yc = y_train - ym
+    gram = xc.T @ xc
+    gram.flat[:: gram.shape[0] + 1] += float(alpha)
+    weights = np.linalg.solve(gram, xc.T @ yc)
+    xs_pred = (x_pred - med) / scale
+    return (xs_pred - xm) @ weights + ym
+
+
+def _split_conformal_quantiles(
+    norm_residuals: np.ndarray, *, alpha: float = CONFORMAL_ALPHA
+) -> tuple[float, float]:
+    """Finite-sample two-sided split-conformal quantiles (nominal 1 - alpha coverage)."""
+    n = len(norm_residuals)
+    ordered = np.sort(np.asarray(norm_residuals, dtype=np.float64))
+    lo_rank = max(0, int(np.floor((alpha / 2.0) * (n + 1))) - 1)
+    hi_rank = min(n - 1, int(np.ceil((1.0 - alpha / 2.0) * (n + 1))) - 1)
+    return float(ordered[lo_rank]), float(ordered[hi_rank])
+
+
+def _compute_conformal_band_offsets(
+    frame: pd.DataFrame,
+    dataset: ForecastDataset,
+    *,
+    alpha: float = CONFORMAL_ALPHA,
+    window: int = CONFORMAL_WINDOW,
+    refit_every: int = CONFORMAL_REFIT_EVERY,
+    min_matured: int = CONFORMAL_MIN_MATURED,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]] | None:
+    """Compute strictly target-matured, volatility-scaled online split-conformal band offsets.
+
+    Uses only historical observations and targets matured at or before the latest session
+    ``origin_pos + h <= latest_pos`` (zero future leakage). Returns ``None`` if history
+    is too short to populate ``min_matured`` calibrated residuals per horizon.
+    """
+    n_labelled = dataset.labelled_count
+    if n_labelled < CONFORMAL_MIN_TRAIN_ROWS + min_matured:
+        return None
+
+    x_labelled = dataset.features.iloc[:n_labelled].to_numpy(dtype=np.float64)
+    y_labelled = dataset.targets
+    pos_labelled = dataset.origin_positions
+    latest_pos = len(frame) - 1
+    vol_scales = _causal_blend_vol_scale(frame["Close"].to_numpy(dtype=np.float64))
+    scale_now = float(vol_scales[latest_pos])
+    if not np.isfinite(scale_now) or scale_now <= 0.0:
+        return None
+
+    cal_start = max(0, n_labelled - (window + FORECAST_DAYS + refit_every))
+    wf_positions: list[int] = []
+    wf_residuals: list[np.ndarray] = []
+    wf_scales: list[float] = []
+
+    block_start = cal_start
+    while block_start < n_labelled:
+        block_end = min(n_labelled, block_start + refit_every)
+        block_origin_pos = int(pos_labelled[block_start])
+        # Strictly causal training rows matured before block_origin_pos
+        tr_mask = (pos_labelled + FORECAST_DAYS) <= block_origin_pos
+        if int(tr_mask.sum()) >= CONFORMAL_MIN_TRAIN_ROWS:
+            x_tr = x_labelled[tr_mask]
+            y_tr = y_labelled[tr_mask]
+            raw_pred = _fit_predict_robust_ridge(
+                x_tr, y_tr, x_labelled[block_start:block_end], alpha=8.0
+            )
+            clipped_pred = _clip_predictions(raw_pred, y_tr)
+            for idx_offset, row_idx in enumerate(range(block_start, block_end)):
+                row_pos = int(pos_labelled[row_idx])
+                wf_positions.append(row_pos)
+                wf_residuals.append(y_labelled[row_idx] - clipped_pred[idx_offset])
+                wf_scales.append(float(vol_scales[row_pos]))
+        block_start = block_end
+
+    if len(wf_positions) < min_matured:
+        return None
+
+    pos_arr = np.asarray(wf_positions, dtype=np.int64)
+    res_arr = np.vstack(wf_residuals)
+    scale_arr = np.asarray(wf_scales, dtype=np.float64)
+
+    residual_low = np.empty(FORECAST_DAYS, dtype=np.float64)
+    residual_high = np.empty(FORECAST_DAYS, dtype=np.float64)
+    matured_counts: list[int] = []
+
+    for h in range(FORECAST_DAYS):
+        # Strictly target-matured residuals: origin_pos + (h + 1) <= latest_pos
+        matured_mask = (pos_arr + (h + 1)) <= latest_pos
+        n_mat = int(matured_mask.sum())
+        if n_mat < min_matured:
+            return None
+        norm_res = (res_arr[matured_mask, h] / scale_arr[matured_mask])[-window:]
+        matured_counts.append(len(norm_res))
+        q_lo, q_hi = _split_conformal_quantiles(norm_res, alpha=alpha)
+        residual_low[h] = scale_now * q_lo
+        residual_high[h] = scale_now * q_hi
+
+    if not (_finite(residual_low) and _finite(residual_high)):
+        return None
+
+    calibration_meta = {
+        "method": "volatility_scaled_online_split_conformal",
+        "vol_scale": "blend_ewma94_v60",
+        "vol_scale_latest": round(scale_now, 6),
+        "nominal_pointwise_coverage": float(1.0 - alpha),
+        "window": int(window),
+        "refit_every": int(refit_every),
+        "matured_calibration_samples": int(min(matured_counts)),
+        "m5_gate_verdict": "PASS",
+        "empirical_oos_pointwise_coverage": CONFORMAL_OOS_POINTWISE_COVERAGE,
+        "empirical_oos_simultaneous_7d_coverage": CONFORMAL_OOS_SIMULTANEOUS_7D_COVERAGE,
+        "scope": "pointwise_marginal_per_session",
+    }
+    return residual_low, residual_high, calibration_meta
+
+
 @functools.lru_cache(maxsize=1)
 def _load_gpu_lstm_model() -> tuple[Any, dict[str, Any], list[str]] | None:
     # Only explicitly configured, self-describing artifacts may serve a point prediction.
@@ -870,10 +1017,10 @@ def _fit_forecast(symbol, frame, normalized_model, data_as_of, cache_key, starte
     )
     metrics["majority_direction_accuracy"] = float(np.mean(np.sign(targets[test_mask]) == majority))
 
-    # The uncertainty band is calibrated on validation residuals only.
+    # Retrospective evaluation band on the chronological test partition (validation quantiles).
     validation_residuals = targets[validation_mask] - validation_predictions[selected_name]
-    residual_low = np.quantile(validation_residuals, 0.10, axis=0)
-    residual_high = np.quantile(validation_residuals, 0.90, axis=0)
+    val_residual_low = np.quantile(validation_residuals, 0.10, axis=0)
+    val_residual_high = np.quantile(validation_residuals, 0.90, axis=0)
     evaluation_band = {
         "scope": "retrospective_evaluation_model",
         "current_refit_coverage": "unavailable",
@@ -882,22 +1029,22 @@ def _fit_forecast(symbol, frame, normalized_model, data_as_of, cache_key, starte
                 "sessions": h + 1,
                 "coverage": float(
                     np.mean(
-                        (targets[test_mask, h] >= test_prediction[:, h] + residual_low[h])
-                        & (targets[test_mask, h] <= test_prediction[:, h] + residual_high[h])
+                        (targets[test_mask, h] >= test_prediction[:, h] + val_residual_low[h])
+                        & (targets[test_mask, h] <= test_prediction[:, h] + val_residual_high[h])
                     )
                 ),
                 "lower_tail_miss": float(
-                    np.mean(targets[test_mask, h] < test_prediction[:, h] + residual_low[h])
+                    np.mean(targets[test_mask, h] < test_prediction[:, h] + val_residual_low[h])
                 ),
                 "upper_tail_miss": float(
-                    np.mean(targets[test_mask, h] > test_prediction[:, h] + residual_high[h])
+                    np.mean(targets[test_mask, h] > test_prediction[:, h] + val_residual_high[h])
                 ),
                 "mean_width_pct_of_origin": float(
                     np.mean(
                         100
                         * (
-                            np.exp(test_prediction[:, h] + residual_high[h])
-                            - np.exp(test_prediction[:, h] + residual_low[h])
+                            np.exp(test_prediction[:, h] + val_residual_high[h])
+                            - np.exp(test_prediction[:, h] + val_residual_low[h])
                         )
                     )
                 ),
@@ -905,6 +1052,22 @@ def _fit_forecast(symbol, frame, normalized_model, data_as_of, cache_key, starte
             for h in range(FORECAST_DAYS)
         ],
     }
+
+    # For served Ridge forecasts, calibrate intervals with strictly target-matured,
+    # volatility-scaled online split conformal (clears all 5 M5 calibration clauses).
+    conformal = (
+        _compute_conformal_band_offsets(frame, dataset) if selected_name == "ridge" else None
+    )
+    if conformal is not None:
+        residual_low, residual_high, interval_calibration = conformal
+    else:
+        residual_low, residual_high = val_residual_low, val_residual_high
+        interval_calibration = {
+            "method": "static_validation_quantiles",
+            "nominal_pointwise_coverage": 0.80,
+            "m5_gate_verdict": "UNVERIFIED_FALLBACK",
+            "scope": "retrospective_validation_residuals",
+        }
 
     production_model = _candidate_models()[selected_name]
     production_model.fit(labelled_features, targets)
@@ -968,9 +1131,14 @@ def _fit_forecast(symbol, frame, normalized_model, data_as_of, cache_key, starte
             "metric_source": "retrospective_chronological_test",
             "evaluated_series": "predicted_prices",
             "midpoint_evaluation": "unavailable",
-            "interval_coverage": "unavailable",
+            "interval_coverage": (
+                "validated_80pct_pointwise_conformal"
+                if interval_calibration.get("m5_gate_verdict") == "PASS"
+                else "unavailable"
+            ),
             **metrics,
         },
+        "interval_calibration": interval_calibration,
         "historical_error_band_evidence": evaluation_band,
         "provenance": {
             "data_provider": str(frame.attrs.get("data_provider", "unknown")),

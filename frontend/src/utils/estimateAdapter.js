@@ -61,11 +61,20 @@ export function getSharedEstimatePresentation({ forecast, history, currencySymbo
   const finalPrice = series[6];
   const changePct = (finalPrice / Number(forecast.current_price) - 1) * 100;
   if (!Number.isFinite(changePct)) return unavailable('invalid_bounds');
+  const calibration = forecast.interval_calibration && typeof forecast.interval_calibration === 'object'
+    ? forecast.interval_calibration
+    : null;
+  const isConformalCalibrated = calibration?.m5_gate_verdict === 'PASS'
+    && calibration?.method === 'volatility_scaled_online_split_conformal';
   return {
     isAvailable: true, isMismatch: false, mismatchReason: null, reason: null,
     series, lowerSeries, upperSeries, futureDates: [...dates], finalPrice, changePct,
     label: 'Range midpoint — experimental',
-    rangeLabel: 'Historical error range (experimental)',
+    rangeLabel: isConformalCalibrated
+      ? '80% pointwise conformal range'
+      : 'Historical error range (experimental)',
+    isConformalCalibrated,
+    intervalCalibration: calibration,
     pointEstimate: Array.isArray(forecast.predicted_prices) && forecast.predicted_prices.length === 7
       && forecast.predicted_prices.every(positive) ? Number(forecast.predicted_prices[6]) : null,
     midpointEvaluation: 'unavailable',
