@@ -847,6 +847,98 @@ def fetch_recent_news(
     return dict(result)
 
 
+def _extract_compound_score(item: dict[str, Any]) -> float | None:
+    raw = item.get("sentiment")
+    if isinstance(raw, dict):
+        raw = raw.get("compound")
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return val if -1.0 <= val <= 1.0 else None
+
+
+def summarize_cached_news_context(ticker: str) -> dict[str, Any]:
+    """Return a non-blocking aggregated news-sentiment summary from the warm cache.
+
+    Never initiates upstream network calls so ``GET /api/v1/forecast`` preserves
+    its cold latency SLO and M5-validated point/conformal predictions.
+    """
+    symbol = ticker.strip().upper()
+    with _lock:
+        cached = _cache.get(symbol)
+        neg_cached = _negative_cache.get(symbol) if cached is None else None
+
+    if cached is None:
+        return {
+            "status": "unavailable" if neg_cached is not None else "not_cached",
+            "sentiment_label": "unavailable",
+            "mean_compound": None,
+            "headline_count": 0,
+            "sec_filing_count": 0,
+            "bullish_count": 0,
+            "bearish_count": 0,
+            "neutral_count": 0,
+            "latest_published_at": None,
+            "provider": "none",
+            "used_in_point_model": False,
+        }
+
+    items = [it for it in (cached.get("items") or []) if isinstance(it, dict)]
+    sec_filings = [it for it in (cached.get("sec_filings") or []) if isinstance(it, dict)]
+
+    compounds: list[float] = []
+    bullish_count = 0
+    bearish_count = 0
+    neutral_count = 0
+    for item in items:
+        score = _extract_compound_score(item)
+        if score is None:
+            continue
+        compounds.append(score)
+        if score >= 0.08:
+            bullish_count += 1
+        elif score <= -0.08:
+            bearish_count += 1
+        else:
+            neutral_count += 1
+
+    mean_compound: float | None = None
+    sentiment_label = "unavailable"
+    if compounds:
+        mean_compound = round(sum(compounds) / len(compounds), 4)
+        if mean_compound >= 0.08:
+            sentiment_label = "bullish"
+        elif mean_compound <= -0.08:
+            sentiment_label = "bearish"
+        else:
+            sentiment_label = "neutral"
+
+    timestamps = [
+        str(entry.get("published_at") or "").strip()
+        for entry in (*items, *sec_filings)
+        if str(entry.get("published_at") or "").strip()
+    ]
+    latest_published_at = max(timestamps) if timestamps else None
+    has_any = bool(items or sec_filings)
+
+    return {
+        "status": "available" if has_any else "unavailable",
+        "sentiment_label": sentiment_label,
+        "mean_compound": mean_compound,
+        "headline_count": len(items),
+        "sec_filing_count": len(sec_filings),
+        "bullish_count": bullish_count,
+        "bearish_count": bearish_count,
+        "neutral_count": neutral_count,
+        "latest_published_at": latest_published_at,
+        "provider": str(cached.get("provider") or "none"),
+        "used_in_point_model": False,
+    }
+
+
 def clear_news_cache() -> None:
     with _lock:
         _cache.clear()
