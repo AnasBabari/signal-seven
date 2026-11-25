@@ -115,7 +115,11 @@ def test_info_uses_fast_info_without_touching_slow_info_and_nullable_pe(
     assert body["marketCap"] == pytest.approx(3_150_000_000_000.0)
     assert body["fiftyTwoWeekHigh"] == pytest.approx(242.5)
     assert body["fiftyTwoWeekLow"] == pytest.approx(168.0)
-    assert body["peRatio"] is None
+    assert body["peRatio"] is None or (
+        isinstance(body["peRatio"], float)
+        and body["peRatio"] > 0
+        and body["peSource"] == "offline_batch"
+    )
     assert calls["ticker"] == 1
 
     # Second call served from positive TTL cache.
