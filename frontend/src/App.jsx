@@ -264,6 +264,131 @@ function mergeNewsAndFilings(news) {
   return combined;
 }
 
+function summarizeNewsSentiment(news, newsContext) {
+  const items = Array.isArray(news?.items) ? news.items : [];
+  const secCount = Array.isArray(news?.sec_filings)
+    ? news.sec_filings.length
+    : items.filter(isSecFilingItem).length;
+
+  const scores = [];
+  for (const item of items) {
+    if (!item || isSecFilingItem(item)) continue;
+    const raw = typeof item.sentiment === 'object' ? item.sentiment?.compound : item.sentiment;
+    const num = Number(raw);
+    if (raw != null && raw !== '' && Number.isFinite(num)) {
+      scores.push(num);
+    } else {
+      const badge = resolveSentimentBadge(item);
+      if (badge.type === 'bullish') scores.push(0.25);
+      else if (badge.type === 'bearish') scores.push(-0.25);
+      else scores.push(0);
+    }
+  }
+
+  let type = null;
+  if (scores.length > 0) {
+    const mean = scores.reduce((acc, v) => acc + v, 0) / scores.length;
+    type = mean >= 0.08 ? 'bullish' : mean <= -0.08 ? 'bearish' : 'neutral';
+  } else if (newsContext?.sentiment_label && newsContext.sentiment_label !== 'unavailable') {
+    type = newsContext.sentiment_label;
+  }
+
+  if (!type) return null;
+  const label = type === 'bullish'
+    ? 'Positive sentiment'
+    : type === 'bearish'
+      ? 'Negative sentiment'
+      : 'Neutral sentiment';
+  return {
+    type,
+    label,
+    headlineCount: scores.length || Number(newsContext?.headline_count || 0),
+    secCount: secCount || Number(newsContext?.sec_filing_count || 0),
+  };
+}
+
+function OverviewNewsPreview({ news, newsContext, ticker, loading, onViewAll }) {
+  const allItems = useMemo(() => mergeNewsAndFilings(news), [news]);
+  const previewItems = allItems.slice(0, 3);
+  const sentiment = useMemo(
+    () => summarizeNewsSentiment(news, newsContext),
+    [news, newsContext],
+  );
+
+  if (!loading && previewItems.length === 0) return null;
+
+  return (
+    <section className="panel overview-news-preview" aria-label={`${ticker} latest financial news`}>
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">Market context</p>
+          <h2>Latest news &amp; filings</h2>
+        </div>
+        <div className="heading-badges">
+          {sentiment && (
+            <span className={`sentiment-badge ${sentiment.type}`}>
+              {sentiment.label}
+            </span>
+          )}
+          <button
+            type="button"
+            className="overview-news-all-btn"
+            onClick={onViewAll}
+          >
+            View all news →
+          </button>
+        </div>
+      </div>
+
+      {loading && previewItems.length === 0 ? (
+        <div className="news-loading-state" role="status" aria-label="Loading latest headlines">
+          <div className="news-skeleton-pulse" />
+          <span>Loading latest stories…</span>
+        </div>
+      ) : (
+        <ul className="news-simple-list overview-news-list">
+          {previewItems.map((item, index) => {
+            const isFiling = isSecFilingItem(item);
+            const filingLabel = isFiling ? resolveSecFormLabel(item) : null;
+            const itemSentiment = resolveSentimentBadge(item);
+            const title = item.title || item.headline || 'Market Update';
+            const rawDate = item.published_at || item.filing_date || '';
+            const timestamp = formatNewsTimestamp(rawDate);
+            const sourceLabel = item.source || (isFiling ? 'SEC EDGAR' : 'Market Wire');
+            return (
+              <li
+                key={`preview-${rawDate}-${item.id || index}`}
+                className={`news-list-item ${isFiling ? 'sec-filing-item' : ''}`}
+              >
+                <div className="news-item-meta">
+                  <span className="news-source">{sourceLabel}</span>
+                  {timestamp && <time className="news-time" dateTime={rawDate}>{timestamp}</time>}
+                  {isFiling ? (
+                    <span className="sec-filing-badge">{filingLabel}</span>
+                  ) : (
+                    <span className={`sentiment-badge ${itemSentiment.type}`}>
+                      {itemSentiment.label}
+                    </span>
+                  )}
+                </div>
+                <h3 className="news-item-headline">
+                  {item.url ? (
+                    <a href={item.url} target="_blank" rel="noreferrer noopener">
+                      {title} <span className="external-arrow" aria-hidden="true">↗</span>
+                    </a>
+                  ) : (
+                    title
+                  )}
+                </h3>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 function NewsPanel({ news, ticker, loading }) {
   const [showAll, setShowAll] = useState(false);
   const [filterKind, setFilterKind] = useState('all'); // 'all' | 'headlines' | 'filings'
@@ -802,12 +927,7 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <div className="ambient-orbs" aria-hidden="true">
-        <div className="orb orb-1" />
-        <div className="orb orb-2" />
-      </div>
-
-      <header className="topbar">
+      <header className={`topbar ${submittedTicker ? 'topbar-has-search' : 'topbar-landing'}`}>
         <a className="brand" href="#top" aria-label="Signal Seven home">
           <span className="brand-icon">S7</span>
           <div className="brand-title-wrap">
@@ -816,14 +936,7 @@ export default function App() {
           </div>
         </a>
 
-        <div className="topbar-right">
-          <ServiceBadge status={serviceStatus} attempt={wakeAttempt} onRetry={wake} />
-        </div>
-      </header>
-
-      <main id="top">
-        {/* Search Header: Large heading on empty first visit; compact row beneath brand after submission */}
-        <section className={`search-section ${submittedTicker ? 'compact-search-section' : 'opening-search-section'}`}>
+        <div className={`topbar-search-slot ${submittedTicker ? 'compact-search-section' : 'opening-search-section'}`}>
           {!submittedTicker && (
             <h1 className="explore-heading">Which stock would you like to explore?</h1>
           )}
@@ -855,33 +968,43 @@ export default function App() {
               </button>
             </div>
           </form>
+        </div>
 
-          {loading && (
-            <div className="search-progress" role="status" aria-live="polite">
-              <span className="progress-dot" aria-hidden="true" />
-              <span>
-                {serviceStatus !== 'online'
-                  ? `Starting forecast service${wakeAttempt > 1 ? ` · attempt ${wakeAttempt}` : ''}… Preparing data for ${submittedTicker}…`
-                  : historyLoading
-                    ? `Loading data for ${submittedTicker}…`
-                    : `Loading forecast for ${submittedTicker}…`}
-              </span>
-            </div>
-          )}
+        <div className="topbar-right">
+          <ServiceBadge status={serviceStatus} attempt={wakeAttempt} onRetry={wake} />
+        </div>
+      </header>
 
-          {unifiedError && (
-            <div className="actionable-forecast-error" role="alert">
-              <span>{unifiedError.message}</span>
-              <button
-                type="button"
-                className="retry-action-btn"
-                onClick={handleRetry}
-              >
-                {unifiedError.actionLabel}
-              </button>
-            </div>
-          )}
-        </section>
+      <main id="top">
+        {(loading || unifiedError) && (
+          <section className="status-banner-section">
+            {loading && (
+              <div className="search-progress" role="status" aria-live="polite">
+                <span className="progress-dot" aria-hidden="true" />
+                <span>
+                  {serviceStatus !== 'online'
+                    ? `Starting forecast service${wakeAttempt > 1 ? ` · attempt ${wakeAttempt}` : ''}… Preparing data for ${submittedTicker}…`
+                    : historyLoading
+                      ? `Loading data for ${submittedTicker}…`
+                      : `Loading forecast for ${submittedTicker}…`}
+                </span>
+              </div>
+            )}
+
+            {unifiedError && (
+              <div className="actionable-forecast-error" role="alert">
+                <span>{unifiedError.message}</span>
+                <button
+                  type="button"
+                  className="retry-action-btn"
+                  onClick={handleRetry}
+                >
+                  {unifiedError.actionLabel}
+                </button>
+              </div>
+            )}
+          </section>
+        )}
 
         {/* Results Workspace */}
         {chartTicker && (
@@ -972,6 +1095,15 @@ export default function App() {
                   currencySymbol={resolvedCurrencySymbol}
                   currentPrice={forecast?.ticker === chartTicker ? forecast?.current_price : null}
                 />
+                {activeTab === 'overview' && (
+                  <OverviewNewsPreview
+                    news={news}
+                    newsContext={forecast?.ticker === chartTicker ? forecast?.news_context : null}
+                    ticker={chartTicker}
+                    loading={newsLoading}
+                    onViewAll={() => selectTab('news')}
+                  />
+                )}
               </div>
 
               <div id="panel-news" role="tabpanel" aria-labelledby="tab-news" hidden={activeTab !== 'news'}>
