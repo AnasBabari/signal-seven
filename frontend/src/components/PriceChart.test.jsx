@@ -312,3 +312,53 @@ it('lazily fetches /api/v1/intraday when user clicks 24H and history has intrada
   expect(btn24h).toHaveAttribute('aria-pressed', 'true');
   expect(lastChartProps.data.labels).toHaveLength(6);
 });
+
+it('renders Trading 212 bottom range bar below canvas with crisp low-tension line and no heavy gridlines', () => {
+  usePriceHistory.mockReturnValue({ history: historyFixture(300, true), loading: false, error: '', retry: vi.fn() });
+  const { container } = render(<PriceChart ticker="MSFT" currencySymbol="$" forecast={forecastFixture} />);
+
+  const chartWrap = container.querySelector('.t212-chart-wrap');
+  const bottomBar = container.querySelector('.t212-bottom-bar');
+  expect(chartWrap).not.toBeNull();
+  expect(bottomBar).not.toBeNull();
+  // Bottom range bar sits strictly after chart canvas wrap in DOM order
+  expect(chartWrap.compareDocumentPosition(bottomBar) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(bottomBar.querySelector('.t212-range-tabs')).not.toBeNull();
+  expect(bottomBar.querySelector('.table-toggle-btn')).not.toBeNull();
+
+  // Crisp Trading 212 line tension & clean canvas (no horizontal gridlines)
+  const historyDs = lastChartProps.data.datasets.find((ds) => ds.role === 'history');
+  const midpointDs = lastChartProps.data.datasets.find((ds) => ds.role === 'midpoint');
+  expect(historyDs.tension).toBeLessThanOrEqual(0.1);
+  expect(midpointDs.tension).toBeLessThanOrEqual(0.1);
+  expect(lastChartProps.options.scales.y.grid.display).toBe(false);
+});
+
+it('scrubs hero price, delta, date, and estimate range live on hover and resets on pointer leave', () => {
+  usePriceHistory.mockReturnValue({ history: historyFixture(300, false), loading: false, error: '', retry: vi.fn() });
+  const { container } = render(<PriceChart ticker="MSFT" currencySymbol="$" forecast={forecastFixture} />);
+
+  // Default hero displays latest close ($399.00)
+  expect(container.querySelector('.t212-price')).toHaveTextContent('$399.00');
+  expect(typeof lastChartProps.options.onHover).toBe('function');
+
+  // 1. Hover historical bar index 5 (1M slice starts at close=378, index 5 => close=383)
+  act(() => {
+    lastChartProps.options.onHover({ type: 'mousemove' }, [{ datasetIndex: 0, index: 5 }]);
+  });
+  expect(container.querySelector('.t212-price')).toHaveTextContent('$383.00');
+  expect(container.querySelector('.t212-scrub-date')).not.toBeNull();
+
+  // 2. Hover forecast bar index 24 (splitIndex=21, offset=2 => futureDates[2]='2024-06-05', midpoint=403, range=399..407)
+  act(() => {
+    lastChartProps.options.onHover({ type: 'mousemove' }, [{ datasetIndex: 3, index: 24 }]);
+  });
+  expect(container.querySelector('.t212-price')).toHaveTextContent('$403.00');
+  expect(container.querySelector('.t212-scrub-date')).toHaveTextContent('2024-06-05');
+  expect(container.querySelector('.t212-scrub-range')).toHaveTextContent('$399.00 – $407.00');
+
+  // 3. Pointer leave restores latest close cleanly
+  fireEvent.pointerLeave(container.querySelector('.t212-chart-wrap'));
+  expect(container.querySelector('.t212-price')).toHaveTextContent('$399.00');
+  expect(container.querySelector('.t212-scrub-date')).toBeNull();
+});

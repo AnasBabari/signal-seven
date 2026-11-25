@@ -127,30 +127,41 @@ const lastPricePlugin = {
   },
 };
 
-// Shaded estimate region past the last actual
+// Subtle vertical anchor separator & glowing anchor dot at latest close
 const forecastRegionPlugin = {
   id: 't212ForecastRegion',
-  beforeDraw: (chart) => {
+  afterDatasetsDraw: (chart) => {
     const { ctx, chartArea, scales } = chart;
     const splitIdx = chart.options.plugins?.t212ForecastRegion?.splitIndex;
     if (splitIdx == null || !scales.x || !chartArea) return;
     const xPos = scales.x.getPixelForValue(splitIdx);
     if (xPos == null || xPos < chartArea.left || xPos > chartArea.right) return;
     ctx.save();
-    ctx.fillStyle = 'rgba(56,189,248,0.06)';
-    ctx.fillRect(xPos, chartArea.top, chartArea.right - xPos, chartArea.bottom - chartArea.top);
     ctx.beginPath();
-    ctx.setLineDash([4, 4]);
-    ctx.strokeStyle = 'rgba(56,189,248,0.35)';
-    ctx.lineWidth = 1.5;
+    ctx.setLineDash([3, 4]);
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.22)';
+    ctx.lineWidth = 1;
     ctx.moveTo(xPos, chartArea.top);
     ctx.lineTo(xPos, chartArea.bottom);
     ctx.stroke();
     ctx.setLineDash([]);
-    ctx.fillStyle = '#38bdf8';
-    ctx.font = '600 10px Inter, sans-serif';
-    ctx.textAlign = 'left';
-    ctx.fillText('ESTIMATE', xPos + 6, chartArea.top + 14);
+
+    const historyData = chart.data?.datasets?.[0]?.data;
+    const anchorVal = Array.isArray(historyData) ? historyData[splitIdx] : null;
+    if (Number.isFinite(anchorVal) && scales.y) {
+      const yPos = scales.y.getPixelForValue(anchorVal);
+      if (yPos >= chartArea.top && yPos <= chartArea.bottom) {
+        const dotColor = chart.data?.datasets?.[0]?.borderColor || '#38bdf8';
+        ctx.beginPath();
+        ctx.arc(xPos, yPos, 6, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(56, 189, 248, 0.18)';
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(xPos, yPos, 3, 0, Math.PI * 2);
+        ctx.fillStyle = dotColor;
+        ctx.fill();
+      }
+    }
     ctx.restore();
   },
 };
@@ -200,6 +211,7 @@ export default function PriceChart({
   const [showForecast, setShowForecast] = useState(true);
   const [isExpanded, setIsExpanded] = useState(false);
   const [showEstimateInfo, setShowEstimateInfo] = useState(false);
+  const [scrubIndex, setScrubIndex] = useState(null);
 
   const chartRef = useRef(null);
   const wrapRef = useRef(null);
@@ -291,6 +303,7 @@ export default function PriceChart({
     });
     setView(null);
     setIsInteracting(false);
+    setScrubIndex(null);
   }, [effectiveHistory, dailyCount, hasIntraday, intradayAvailable, ticker, selectedRange]);
 
   const activeRange = rangeId || (selectedRange && available.includes(selectedRange) ? selectedRange : defaultRangeId(available));
@@ -381,17 +394,17 @@ export default function PriceChart({
   const colors = useMemo(() => {
     const up = stats.up;
     return {
-      line: up ? '#00f5a0' : '#ff5c5c',
-      areaTop: up ? 'rgba(0,245,160,0.18)' : 'rgba(255,92,92,0.18)',
-      grid: 'rgba(255,255,255,0.05)',
-      tick: '#94a3b8',
-      tooltipBg: '#0d0d1a',
-      tooltipTitle: '#e8e8f0',
+      line: up ? '#16c784' : '#ff4d4f',
+      areaTop: up ? 'rgba(22, 199, 132, 0.16)' : 'rgba(255, 77, 79, 0.15)',
+      grid: 'rgba(255,255,255,0.03)',
+      tick: '#7c879b',
+      tooltipBg: '#131722',
+      tooltipTitle: '#f1f5f9',
       tooltipBody: '#cbd5e1',
-      tooltipBorder: 'rgba(255,255,255,0.12)',
+      tooltipBorder: 'rgba(255,255,255,0.08)',
       estimate: '#38bdf8',
-      bandBorder: 'rgba(56, 189, 248, 0.28)',
-      bandFill: 'rgba(56, 189, 248, 0.12)',
+      bandBorder: 'rgba(56, 189, 248, 0.22)',
+      bandFill: 'rgba(56, 189, 248, 0.09)',
     };
   }, [stats.up]);
 
@@ -418,7 +431,9 @@ export default function PriceChart({
       pointRadius: 0,
       pointHoverRadius: 5,
       pointHoverBackgroundColor: colors.line,
-      tension: 0.25,
+      pointHoverBorderColor: '#0b0e14',
+      pointHoverBorderWidth: 2,
+      tension: 0.08,
       fill: true,
       spanGaps: false,
     });
@@ -450,7 +465,7 @@ export default function PriceChart({
           pointRadius: 0,
           pointHoverRadius: 0,
           pointHitRadius: 0,
-          tension: 0.25,
+          tension: 0.08,
           fill: '+1',
           spanGaps: false,
         });
@@ -465,7 +480,7 @@ export default function PriceChart({
           pointRadius: 0,
           pointHoverRadius: 0,
           pointHitRadius: 0,
-          tension: 0.25,
+          tension: 0.08,
           fill: false,
           spanGaps: false,
         });
@@ -477,12 +492,14 @@ export default function PriceChart({
         data: padAnchoredForecast(estimate.series, anchorClose, forecastSplitIndex),
         borderColor: colors.estimate,
         backgroundColor: 'transparent',
-        borderWidth: 2.2,
+        borderWidth: 2,
         borderDash: [6, 4],
         pointRadius: 0,
-        pointHoverRadius: 6,
+        pointHoverRadius: 5,
         pointHoverBackgroundColor: colors.estimate,
-        tension: 0.25,
+        pointHoverBorderColor: '#0b0e14',
+        pointHoverBorderWidth: 2,
+        tension: 0.08,
         fill: false,
         spanGaps: false,
       });
@@ -709,6 +726,13 @@ export default function PriceChart({
       maintainAspectRatio: false,
       animation: (isInteracting || isZoomed) ? false : { duration: 250 },
       interaction: { mode: 'index', intersect: false },
+      onHover: (_event, elements) => {
+        const nextIdx = elements?.[0]?.index;
+        setScrubIndex((prev) => {
+          const resolved = Number.isInteger(nextIdx) ? nextIdx : null;
+          return prev === resolved ? prev : resolved;
+        });
+      },
       plugins: {
         legend: { display: false },
         t212ForecastRegion: { splitIndex },
@@ -716,7 +740,7 @@ export default function PriceChart({
           ? undefined
           : {
             value: latestClosePrice,
-            color: stats.change > 0 ? '#00f5a0' : stats.change < 0 ? '#ff5c5c' : '#94a3b8',
+            color: stats.change > 0 ? '#16c784' : stats.change < 0 ? '#ff4d4f' : '#94a3b8',
             label: formatMoneyLocal(latestClosePrice, currencySymbol),
           },
         tooltip: {
@@ -779,12 +803,14 @@ export default function PriceChart({
         y: {
           ...yBounds,
           position: 'right',
+          border: { display: false },
           ticks: {
             color: colors.tick,
-            font: { family: 'JetBrains Mono, monospace', size: 10 },
+            maxTicksLimit: 5,
+            font: { family: 'Inter, system-ui, sans-serif', size: 11 },
             callback: (v) => formatMoneyLocal(Number(v), currencySymbol),
           },
-          grid: { color: colors.grid },
+          grid: { display: false },
         },
       },
     };
@@ -810,6 +836,7 @@ export default function PriceChart({
     setRangeId(id);
     setView(null);
     setIsInteracting(false);
+    setScrubIndex(null);
     onRangeChange?.(id);
   }, [onRangeChange]);
 
@@ -818,8 +845,35 @@ export default function PriceChart({
     setIsInteracting(false);
   }, []);
 
-  const changeClass = stats.change > 0 ? 'up' : stats.change < 0 ? 'down' : 'flat';
-  const sign = stats.change > 0 ? '+' : '';
+  const scrubDisplay = useMemo(() => {
+    if (scrubIndex == null || scrubIndex < 0 || scrubIndex >= chartData.labels.length) return null;
+    const isEstimatePoint = chartData.forecastSplitIndex != null && scrubIndex > chartData.forecastSplitIndex;
+    const rawVal = isEstimatePoint
+      ? datasetByRole.midpoint?.data?.[scrubIndex]
+      : datasetByRole.history?.data?.[scrubIndex];
+    const price = Number(rawVal);
+    if (!Number.isFinite(price)) return null;
+    const basePrice = isEstimatePoint ? stats.last : stats.first;
+    const change = Number.isFinite(basePrice) ? price - basePrice : 0;
+    const changePct = Number.isFinite(basePrice) && basePrice > 0 ? (change / basePrice) * 100 : 0;
+    const low = isEstimatePoint ? Number(datasetByRole.bandLower?.data?.[scrubIndex]) : NaN;
+    const high = isEstimatePoint ? Number(datasetByRole.bandUpper?.data?.[scrubIndex]) : NaN;
+    return {
+      isEstimate: isEstimatePoint,
+      price,
+      change,
+      changePct,
+      date: String(chartData.labels[scrubIndex] ?? ''),
+      low: Number.isFinite(low) ? low : null,
+      high: Number.isFinite(high) ? high : null,
+    };
+  }, [scrubIndex, chartData, datasetByRole, stats.first, stats.last]);
+
+  const heroPrice = scrubDisplay ? scrubDisplay.price : stats.last;
+  const heroChange = scrubDisplay ? scrubDisplay.change : stats.change;
+  const heroChangePct = scrubDisplay ? scrubDisplay.changePct : stats.changePct;
+  const changeClass = heroChange > 0 ? 'up' : heroChange < 0 ? 'down' : 'flat';
+  const sign = heroChange > 0 ? '+' : '';
   const dataDate = effectiveHistory?.asOf || (Array.isArray(effectiveHistory?.daily) ? effectiveHistory.daily.at(-1)?.d : null);
   const suppliedCompanyName = (companyName || forecastForTicker?.ticker_name || '').trim();
   const resolvedCompanyName = suppliedCompanyName && suppliedCompanyName.toUpperCase() !== String(ticker || '').toUpperCase()
@@ -937,35 +991,43 @@ export default function PriceChart({
           <div className="t212-title-row">
             {resolvedCompanyName && <span className="t212-company-name">{resolvedCompanyName}</span>}
             <span className="t212-ticker">{ticker}</span>
+            {dataDate && !points.isIntraday && !scrubDisplay && (
+              <span className="t212-data-date" title={`Market data through ${dataDate}`}>
+                Data through {dataDate}
+              </span>
+            )}
           </div>
 
           {hasData ? (
             <div className="t212-metrics-row">
-              <strong className="t212-price mono">
-                {formatMoneyLocal(stats.last, currencySymbol)}
+              <strong className={`t212-price ${scrubDisplay?.isEstimate ? 'is-estimate' : ''}`}>
+                {formatMoneyLocal(heroPrice, currencySymbol)}
               </strong>
               {points.prices.filter(Number.isFinite).length >= 2 && (
                 <span className={`t212-change ${changeClass}`}>
-                  {sign}{formatMoneyLocal(stats.change, currencySymbol)} ({sign}{stats.changePct.toFixed(2)}%)
+                  {sign}{formatMoneyLocal(heroChange, currencySymbol)} ({sign}{heroChangePct.toFixed(2)}%)
                 </span>
               )}
-              <span className="t212-range-name">
-                {activeRange === 'MAX' ? `Available history · ${points.labels[0]}–${points.labels.at(-1)}` : activeRange}
-              </span>
-              {dataDate && !points.isIntraday && (
-                <span className="t212-data-date" title={`Market data through ${dataDate}`}>
-                  Data through {dataDate}
+              {scrubDisplay ? (
+                <>
+                  <span className="t212-scrub-date">
+                    {scrubDisplay.isEstimate ? `Estimate · ${scrubDisplay.date}` : scrubDisplay.date}
+                  </span>
+                  {scrubDisplay.isEstimate && scrubDisplay.low != null && scrubDisplay.high != null && (
+                    <span className="t212-scrub-range">
+                      Range: {formatMoneyLocal(scrubDisplay.low, currencySymbol)} – {formatMoneyLocal(scrubDisplay.high, currencySymbol)}
+                    </span>
+                  )}
+                </>
+              ) : (
+                <span className="t212-range-name">
+                  {activeRange === 'MAX' ? `Available history · ${points.labels[0]}–${points.labels.at(-1)}` : activeRange}
                 </span>
               )}
             </div>
           ) : (
             <span className="t212-price-skeleton" aria-hidden="true" />
           )}
-        </div>
-
-        {/* Restrained Toolbar */}
-        <div className="t212-restrained-toolbar">
-          {renderRangeAndOverlayControls(false)}
         </div>
       </div>
 
@@ -1029,6 +1091,8 @@ export default function PriceChart({
       <div
         className={`t212-chart-wrap ${isExpanded ? 'expanded' : ''}`}
         ref={wrapRef}
+        onPointerLeave={() => setScrubIndex(null)}
+        onMouseLeave={() => setScrubIndex(null)}
         role={isExpanded ? 'dialog' : undefined}
         aria-modal={isExpanded ? 'true' : undefined}
         aria-label={isExpanded ? 'Expanded price chart' : undefined}
@@ -1092,6 +1156,11 @@ export default function PriceChart({
             <div className="empty-copy">Not enough price history for this view.</div>
           )}
         </div>
+      </div>
+
+      {/* Trading 212 Bottom Range & Controls Bar */}
+      <div className="t212-restrained-toolbar t212-bottom-bar">
+        {renderRangeAndOverlayControls(false)}
       </div>
 
       {hasData && (
