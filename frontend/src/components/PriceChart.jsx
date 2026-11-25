@@ -439,9 +439,10 @@ export default function PriceChart({
         && estimate.upperSeries.length === estimate.series.length;
 
       if (hasRangeBand) {
+        const activeRangeLabel = estimate.rangeLabel || 'Historical error range (experimental)';
         datasets.push({
           role: 'band-upper',
-          label: 'Historical error range (experimental)',
+          label: activeRangeLabel,
           data: padAnchoredForecast(estimate.upperSeries, anchorClose, forecastSplitIndex),
           borderColor: colors.bandBorder,
           backgroundColor: colors.bandFill,
@@ -456,7 +457,7 @@ export default function PriceChart({
 
         datasets.push({
           role: 'band-lower',
-          label: 'Historical error range (experimental) — lower',
+          label: `${activeRangeLabel} — lower`,
           data: padAnchoredForecast(estimate.lowerSeries, anchorClose, forecastSplitIndex),
           borderColor: colors.bandBorder,
           backgroundColor: 'transparent',
@@ -985,7 +986,7 @@ export default function PriceChart({
                 <>
                   {' · '}
                   <span className="estimate-range-summary">
-                    Historical error range (experimental): {formatMoneyLocal(finalLow, currencySymbol)} – {formatMoneyLocal(finalHigh, currencySymbol)}
+                    {estimate.rangeLabel || 'Historical error range (experimental)'}: {formatMoneyLocal(finalLow, currencySymbol)} – {formatMoneyLocal(finalHigh, currencySymbol)}
                   </span>
                 </>
               )}
@@ -1004,9 +1005,21 @@ export default function PriceChart({
 
           {showEstimateInfo && (
             <p className="estimate-inline-explanation">
-              The shaded band shows the historical error range (experimental) anchored at the latest close, and the dashed line averages its upper and lower bounds.
-              {estimate.pointEstimate != null ? ` The model point forecast is ${formatMoneyLocal(estimate.pointEstimate, currencySymbol)}.` : ' The model point forecast is unavailable.'}
-              {' '}Coverage for this refit is unverified and has not been certified.
+              {estimate.isConformalCalibrated ? (
+                <>
+                  The shaded band is a volatility-scaled online conformal range targeting 80% pointwise coverage per session (validated at{' '}
+                  {((estimate.intervalCalibration?.empirical_oos_pointwise_coverage ?? 0.7915) * 100).toFixed(1)}% across 20,839 out-of-sample US &amp; LSE forecasts; simultaneous 7-day full-path coverage is ~
+                  {((estimate.intervalCalibration?.empirical_oos_simultaneous_7d_coverage ?? 0.5045) * 100).toFixed(0)}%), and the dashed line averages its upper and lower bounds.
+                  {estimate.pointEstimate != null ? ` The model point forecast is ${formatMoneyLocal(estimate.pointEstimate, currencySymbol)}.` : ' The model point forecast is unavailable.'}
+                  {' '}Experimental estimate, not financial advice.
+                </>
+              ) : (
+                <>
+                  The shaded band shows the historical error range (experimental) anchored at the latest close, and the dashed line averages its upper and lower bounds.
+                  {estimate.pointEstimate != null ? ` The model point forecast is ${formatMoneyLocal(estimate.pointEstimate, currencySymbol)}.` : ' The model point forecast is unavailable.'}
+                  {' '}Coverage for this refit is unverified and has not been certified.
+                </>
+              )}
             </p>
           )}
         </div>
@@ -1083,7 +1096,7 @@ export default function PriceChart({
 
       {hasData && (
         <p id={descriptionId} className="sr-only">
-          Solid line: recorded historical closes. Shaded region and dashed line: historical error range (experimental) and seven-session midpoint. Use the Table button in the chart toolbar to read exact values.
+          Solid line: recorded historical closes. Shaded region and dashed line: {(estimate?.rangeLabel || 'historical error range (experimental)').toLowerCase()} and seven-session midpoint. Use the Table button in the chart toolbar to read exact values.
         </p>
       )}
 
@@ -1098,7 +1111,7 @@ export default function PriceChart({
                   <th scope="col">Historical close</th>
                   <th scope="col">Range midpoint</th>
                   {datasetByRole.bandLower && datasetByRole.bandUpper && (
-                    <th scope="col">Historical error range (experimental)</th>
+                    <th scope="col">{estimate?.rangeLabel || 'Historical error range (experimental)'}</th>
                   )}
                 </tr>
               </thead>

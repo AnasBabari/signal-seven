@@ -52,6 +52,7 @@ from services.simple_forecast import (  # noqa: E402
     MIN_HISTORY_ROWS,
     ForecastDataset,
     _clip_predictions,
+    _compute_conformal_band_offsets_from_arrays,
     build_features,
     chronological_masks,
     get_ticker_meta,
@@ -1229,11 +1230,15 @@ def exact_served_ridge_at_origin(
     all_targets: np.ndarray,
     all_feature_positions: np.ndarray,
     origin_pos: int,
+    close_prices: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     """Run exact ``simple_forecast.py`` Ridge selection/fitting/band logic at ``origin_pos``.
 
     Uses ONLY bars ``0..origin_pos`` (``raw_rows = origin_pos + 1``) so every training
     and validation target satisfies ``target_pos <= origin_pos`` (strict target maturity).
+    When ``close_prices`` is provided, uses the production volatility-scaled online
+    split-conformal offsets (matching ``train_and_forecast(..., model_name='ridge')``
+    to ``1e-12``), falling back to static validation quantiles otherwise.
     """
     raw_rows = origin_pos + 1
     if raw_rows < MIN_HISTORY_ROWS:
@@ -1254,14 +1259,28 @@ def exact_served_ridge_at_origin(
     )
     train_mask, val_mask, _test_mask = chronological_masks(ds, raw_rows)
 
-    # 1. Validation residual quantiles (exact simple_forecast.py lines 802-834)
-    val_raw = _fit_predict_robust_ridge(
-        x_matured[train_mask], y_matured[train_mask], x_matured[val_mask], alpha=8.0
+    # 1. Production volatility-scaled online split-conformal offsets (fallback: static val quantiles)
+    conformal = (
+        _compute_conformal_band_offsets_from_arrays(
+            close_prices,
+            x_matured,
+            y_matured,
+            matured_positions,
+            origin_pos,
+        )
+        if close_prices is not None
+        else None
     )
-    val_preds = _clip_predictions(val_raw, y_matured[train_mask])
-    val_residuals = y_matured[val_mask] - val_preds
-    residual_low = np.quantile(val_residuals, 0.10, axis=0)
-    residual_high = np.quantile(val_residuals, 0.90, axis=0)
+    if conformal is not None:
+        residual_low, residual_high, _cal_meta = conformal
+    else:
+        val_raw = _fit_predict_robust_ridge(
+            x_matured[train_mask], y_matured[train_mask], x_matured[val_mask], alpha=8.0
+        )
+        val_preds = _clip_predictions(val_raw, y_matured[train_mask])
+        val_residuals = y_matured[val_mask] - val_preds
+        residual_low = np.quantile(val_residuals, 0.10, axis=0)
+        residual_high = np.quantile(val_residuals, 0.90, axis=0)
 
     # 2. Production refit on all matured labelled rows (exact simple_forecast.py lines 867-874)
     latest_row_idx = int(np.searchsorted(all_feature_positions, origin_pos))

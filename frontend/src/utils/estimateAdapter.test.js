@@ -41,11 +41,40 @@ describe('getSharedEstimatePresentation', () => {
     expect(res.lowerSeries).toEqual(baseForecast.lower_prices);
     expect(res.upperSeries).toEqual(baseForecast.upper_prices);
     expect(res.rangeLabel).toBe('Historical error range (experimental)');
+    expect(res.isConformalCalibrated).toBe(false);
     expect(res.series[0]).toBeCloseTo((482.45 + 495.1) / 2, 4);
     expect(res.series[6]).toBeCloseTo((468.65 + 492.41) / 2, 4);
     expect(res.finalPrice).toBe(res.series[6]);
     expect(res.changePct).toBeCloseTo(((res.finalPrice / 491.65) - 1) * 100, 4);
     expect(res.direction).toBe('down');
+  });
+
+  it('upgrades rangeLabel to 80% pointwise conformal range only when M5 conformal gate passes', () => {
+    const calibratedForecast = {
+      ...baseForecast,
+      interval_calibration: {
+        method: 'volatility_scaled_online_split_conformal',
+        m5_gate_verdict: 'PASS',
+        nominal_pointwise_coverage: 0.8,
+        empirical_oos_pointwise_coverage: 0.7915,
+        empirical_oos_simultaneous_7d_coverage: 0.5045,
+      },
+    };
+    const res = getSharedEstimatePresentation({ forecast: calibratedForecast, history: baseHistory });
+    expect(res.isAvailable).toBe(true);
+    expect(res.isConformalCalibrated).toBe(true);
+    expect(res.rangeLabel).toBe('80% pointwise conformal range');
+
+    const unverifiedForecast = {
+      ...baseForecast,
+      interval_calibration: {
+        method: 'static_validation_quantiles',
+        m5_gate_verdict: 'UNVERIFIED_FALLBACK',
+      },
+    };
+    const fallback = getSharedEstimatePresentation({ forecast: unverifiedForecast, history: baseHistory });
+    expect(fallback.isConformalCalibrated).toBe(false);
+    expect(fallback.rangeLabel).toBe('Historical error range (experimental)');
   });
 
   it('keeps an asymmetric midpoint distinct when point direction disagrees', () => {
