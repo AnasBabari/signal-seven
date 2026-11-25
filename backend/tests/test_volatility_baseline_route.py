@@ -107,12 +107,12 @@ def test_auto_policy_is_horizon_specific(monkeypatch):
     assert one_day.status_code == 200
     assert five_day.status_code == 200
     assert one_day.json()["forecast"]["model"] == "garch_11"
-    assert five_day.json()["forecast"]["model"] == "rolling_mean"
+    assert five_day.json()["forecast"]["model"] == "har_rv"
     assert one_day.json()["evidence"]["auto_model_policy"] == {
         "1": "garch_11",
-        "5": "rolling_mean",
-        "10": "rolling_mean",
-        "20": "rolling_mean",
+        "5": "har_rv",
+        "10": "har_rv",
+        "20": "har_rv",
     }
 
 
@@ -153,7 +153,7 @@ def test_public_forecast_and_ledger_reads_never_write(monkeypatch, tmp_path):
         },
     )
     assert resp.status_code == 200
-    assert resp.json()["forecast"]["model"] == "rolling_mean"
+    assert resp.json()["forecast"]["model"] == "har_rv"
     assert resp.json()["evidence"]["ledger_write"] == "disabled_public_preview"
 
     # 2. Query ledger

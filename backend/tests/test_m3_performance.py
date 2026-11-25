@@ -41,16 +41,22 @@ def _reference_causal_log_har_forecasts(
     minimum_history: int = 60,
     refit_every: int = 5,
     ridge: float = 1e-4,
+    smearing: bool = True,
+    smearing_exp_cap: float = 50.0,
+    smearing_max: float = 8.0,
 ) -> np.ndarray:
-    """Exact pre-M3 reference loop kept solely as an oracle for parity verification."""
+    """Exact row-loop reference oracle (supports both Duan-smeared and legacy HAR)."""
     rv = np.asarray(rv_daily, dtype=np.float64)
     output = np.full((len(rv), len(horizons)), np.nan, dtype=np.float64)
     coefficients: np.ndarray | None = None
+    smear = 1.0
     last_refit = -refit_every
     maximum_horizon = max(horizons)
     horizon_to_column = {horizon: column for column, horizon in enumerate(horizons)}
     xtx = np.zeros((4, 4), dtype=np.float64)
     xty = np.zeros(4, dtype=np.float64)
+    design_rows: list[np.ndarray] = []
+    response_rows: list[float] = []
     fitted_rows = 0
     penalty = np.eye(4, dtype=np.float64) * float(ridge)
     penalty[0, 0] = 0.0
@@ -64,6 +70,8 @@ def _reference_causal_log_har_forecasts(
             response = float(np.log(max(rv[origin], 1e-12)))
             xtx += np.outer(design, design)
             xty += design * response
+            design_rows.append(design)
+            response_rows.append(response)
             fitted_rows += 1
         if origin < max(minimum_history, 22) or fitted_rows < 20:
             continue
@@ -71,13 +79,25 @@ def _reference_causal_log_har_forecasts(
             continue
         if coefficients is None or origin - last_refit >= refit_every:
             coefficients = np.linalg.solve(xtx + penalty, xty)
+            if smearing:
+                x_mat = np.asarray(design_rows, dtype=np.float64)
+                y_vec = np.asarray(response_rows, dtype=np.float64)
+                resid = y_vec - x_mat @ coefficients
+                raw_smear = float(
+                    np.mean(
+                        np.minimum(np.exp(np.clip(resid, -20.0, 10.0)), float(smearing_exp_cap))
+                    )
+                )
+                smear = float(np.clip(raw_smear, 1.0, float(smearing_max)))
+            else:
+                smear = 1.0
             last_refit = origin
 
         history_tail = list(np.maximum(rv[origin - 21 : origin + 1], 1e-12))
         cumulative = 0.0
         for step in range(1, maximum_horizon + 1):
             row = volatility_snapshot._log_har_row(np.asarray(history_tail, dtype=np.float64))
-            next_variance = float(np.exp(np.clip(row @ coefficients, -30.0, 5.0)))
+            next_variance = float(smear * np.exp(np.clip(row @ coefficients, -30.0, 5.0)))
             next_variance = max(next_variance, 1e-12)
             history_tail.append(next_variance)
             del history_tail[0]
@@ -140,14 +160,21 @@ def test_vectorized_har_matches_reference_with_nans() -> None:
     rv[91] = np.nan
     rv[140] = np.nan
 
-    expected = _reference_causal_log_har_forecasts(rv, (1, 5, 10, 20), refit_every=5)
-    got_full = volatility_snapshot.causal_log_har_forecasts(rv, (1, 5, 10, 20), refit_every=5)
-    got_latest = volatility_snapshot.causal_log_har_forecasts(
-        rv, (1, 5, 10, 20), refit_every=5, latest_only=True
-    )
+    for smearing in (True, False):
+        expected = _reference_causal_log_har_forecasts(
+            rv, (1, 5, 10, 20), refit_every=5, smearing=smearing
+        )
+        got_full = volatility_snapshot.causal_log_har_forecasts(
+            rv, (1, 5, 10, 20), refit_every=5, smearing=smearing
+        )
+        got_latest = volatility_snapshot.causal_log_har_forecasts(
+            rv, (1, 5, 10, 20), refit_every=5, latest_only=True, smearing=smearing
+        )
 
-    np.testing.assert_allclose(got_full, expected, rtol=1e-6, atol=0.0, equal_nan=True)
-    np.testing.assert_allclose(got_latest[-1], expected[-1], rtol=1e-6, atol=0.0, equal_nan=True)
+        np.testing.assert_allclose(got_full, expected, rtol=1e-6, atol=0.0, equal_nan=True)
+        np.testing.assert_allclose(
+            got_latest[-1], expected[-1], rtol=1e-6, atol=0.0, equal_nan=True
+        )
 
 
 def test_lazy_garch_is_skipped_on_h5_and_exact_on_h1(monkeypatch) -> None:
@@ -175,9 +202,9 @@ def test_lazy_garch_is_skipped_on_h5_and_exact_on_h1(monkeypatch) -> None:
     assert isinstance(snapshot.raw_ohlcv, np.ndarray)
     assert not snapshot.raw_ohlcv.flags.writeable
 
-    # H=5 auto (rolling_mean) must still NOT invoke GARCH(1,1).
+    # H=5 auto (har_rv under v5_duan_har) must still NOT invoke GARCH(1,1).
     h5 = build_live_volatility_forecast(snapshot, horizon=5, model="auto")
-    assert h5["forecast"]["model"] == "rolling_mean"
+    assert h5["forecast"]["model"] == "har_rv"
     assert garch_calls["count"] == 0
 
     # H=1 auto routes to garch_11 and computes lazily ONCE, matching exact MLE path.

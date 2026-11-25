@@ -57,9 +57,9 @@ def _synthetic_ohlcv(rows: int = 520, *, seed: int = 23, end: str = "2026-09-02"
 
 
 def test_volatility_default_policy_maps_and_h1_garch_invariant(monkeypatch) -> None:
-    assert DEFAULT_VOLATILITY_POLICY == "v3_baseline"
-    assert settings.volatility_default_policy == "v3_baseline"
-    assert resolve_volatility_policy_name() == "v3_baseline"
+    assert DEFAULT_VOLATILITY_POLICY == "v5_duan_har"
+    assert settings.volatility_default_policy == "v5_duan_har"
+    assert resolve_volatility_policy_name() == "v5_duan_har"
 
     for name, expected in (
         (
@@ -73,6 +73,10 @@ def test_volatility_default_policy_maps_and_h1_garch_invariant(monkeypatch) -> N
         (
             "v4_g3",
             {1: "garch_11", 5: "gpu_g3", 10: "gpu_g3", 20: "gpu_g3"},
+        ),
+        (
+            "v5_duan_har",
+            {1: "garch_11", 5: "har_rv", 10: "har_rv", 20: "har_rv"},
         ),
     ):
         resolved = resolve_auto_model_policy(name)
