@@ -239,7 +239,13 @@ def test_exact_served_ridge_zero_future_leakage_and_serving_parity() -> None:
             if p + FORECAST_DAYS < len(frame):
                 for h in range(FORECAST_DAYS):
                     targets[i, h] = float(log_c[p + h + 1] - log_c[p])
-        return exact_served_ridge_at_origin(feats, targets, fpos, origin_pos)
+        return exact_served_ridge_at_origin(
+            feats,
+            targets,
+            fpos,
+            origin_pos,
+            close_prices=frame["Close"].to_numpy(dtype=np.float64),
+        )
 
     out_clean = _run_origin(df)
     out_mut = _run_origin(df_mutated)

@@ -669,30 +669,26 @@ def _split_conformal_quantiles(
     return float(ordered[lo_rank]), float(ordered[hi_rank])
 
 
-def _compute_conformal_band_offsets(
-    frame: pd.DataFrame,
-    dataset: ForecastDataset,
+def _compute_conformal_band_offsets_from_arrays(
+    close_prices: np.ndarray,
+    x_labelled: np.ndarray,
+    y_labelled: np.ndarray,
+    pos_labelled: np.ndarray,
+    latest_pos: int,
     *,
     alpha: float = CONFORMAL_ALPHA,
     window: int = CONFORMAL_WINDOW,
     refit_every: int = CONFORMAL_REFIT_EVERY,
     min_matured: int = CONFORMAL_MIN_MATURED,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]] | None:
-    """Compute strictly target-matured, volatility-scaled online split-conformal band offsets.
-
-    Uses only historical observations and targets matured at or before the latest session
-    ``origin_pos + h <= latest_pos`` (zero future leakage). Returns ``None`` if history
-    is too short to populate ``min_matured`` calibrated residuals per horizon.
-    """
-    n_labelled = dataset.labelled_count
+    """Compute strictly target-matured, volatility-scaled online split-conformal offsets."""
+    n_labelled = len(pos_labelled)
     if n_labelled < CONFORMAL_MIN_TRAIN_ROWS + min_matured:
         return None
 
-    x_labelled = dataset.features.iloc[:n_labelled].to_numpy(dtype=np.float64)
-    y_labelled = dataset.targets
-    pos_labelled = dataset.origin_positions
-    latest_pos = len(frame) - 1
-    vol_scales = _causal_blend_vol_scale(frame["Close"].to_numpy(dtype=np.float64))
+    vol_scales = _causal_blend_vol_scale(
+        np.asarray(close_prices[: latest_pos + 1], dtype=np.float64)
+    )
     scale_now = float(vol_scales[latest_pos])
     if not np.isfinite(scale_now) or scale_now <= 0.0:
         return None
@@ -762,6 +758,37 @@ def _compute_conformal_band_offsets(
         "scope": "pointwise_marginal_per_session",
     }
     return residual_low, residual_high, calibration_meta
+
+
+def _compute_conformal_band_offsets(
+    frame: pd.DataFrame,
+    dataset: ForecastDataset,
+    *,
+    alpha: float = CONFORMAL_ALPHA,
+    window: int = CONFORMAL_WINDOW,
+    refit_every: int = CONFORMAL_REFIT_EVERY,
+    min_matured: int = CONFORMAL_MIN_MATURED,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]] | None:
+    """Compute strictly target-matured, volatility-scaled online split-conformal band offsets.
+
+    Uses only historical observations and targets matured at or before the latest session
+    ``origin_pos + h <= latest_pos`` (zero future leakage). Returns ``None`` if history
+    is too short to populate ``min_matured`` calibrated residuals per horizon.
+    """
+    n_labelled = dataset.labelled_count
+    if n_labelled < CONFORMAL_MIN_TRAIN_ROWS + min_matured:
+        return None
+    return _compute_conformal_band_offsets_from_arrays(
+        frame["Close"].to_numpy(dtype=np.float64),
+        dataset.features.iloc[:n_labelled].to_numpy(dtype=np.float64),
+        dataset.targets,
+        dataset.origin_positions,
+        len(frame) - 1,
+        alpha=alpha,
+        window=window,
+        refit_every=refit_every,
+        min_matured=min_matured,
+    )
 
 
 @functools.lru_cache(maxsize=1)
