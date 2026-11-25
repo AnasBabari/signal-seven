@@ -48,6 +48,12 @@ _catalog_lock = threading.Lock()
 _catalog_cache: dict[str, dict[str, Any]] = {}
 _catalog_mtime_ns: int | None = None
 
+_fundamentals_lock = threading.Lock()
+_fundamentals_cache: dict[str, dict[str, Any]] = {}
+_fundamentals_mtime_ns: int | None = None
+_MIN_VALID_PE_TTM = 1.0
+_MAX_VALID_PE_TTM = 1000.0
+
 _FALLBACK_SECTOR_INDUSTRY: dict[str, tuple[str, str]] = {
     "AAPL": ("Information Technology", "Consumer Electronics"),
     "MSFT": ("Information Technology", "Systems Software"),
@@ -94,6 +100,51 @@ def clear_intraday_cache() -> None:
     with _intraday_cache_lock:
         _intraday_cache.clear()
         _intraday_negative_cache.clear()
+
+
+def clear_fundamentals_cache() -> None:
+    global _fundamentals_mtime_ns
+    with _fundamentals_lock:
+        _fundamentals_cache.clear()
+        _fundamentals_mtime_ns = None
+
+
+def _load_disk_fundamentals_entry(symbol: str) -> dict[str, Any] | None:
+    """Load offline batch fundamentals entry from backend/data/universe_fundamentals.json."""
+    global _fundamentals_mtime_ns
+    path = Path(__file__).resolve().parents[1] / "data" / "universe_fundamentals.json"
+    with _fundamentals_lock:
+        try:
+            st = path.stat()
+        except OSError:
+            _fundamentals_cache.clear()
+            _fundamentals_mtime_ns = None
+            return None
+        if st.st_mtime_ns != _fundamentals_mtime_ns:
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                parsed: dict[str, dict[str, Any]] = {}
+                default_updated = str(raw.get("updated_at") or "") if isinstance(raw, dict) else ""
+                container = raw.get("tickers") if isinstance(raw, dict) else None
+                if isinstance(container, dict):
+                    for k, v in container.items():
+                        if isinstance(v, dict):
+                            pe_val = _finite_number(v.get("pe_ttm"))
+                            if (
+                                pe_val is not None
+                                and _MIN_VALID_PE_TTM <= pe_val < _MAX_VALID_PE_TTM
+                            ):
+                                parsed[str(k).strip().upper()] = {
+                                    "pe_ttm": round(pe_val, 2),
+                                    "updated_at": str(v.get("updated_at") or default_updated or ""),
+                                }
+                _fundamentals_cache.clear()
+                _fundamentals_cache.update(parsed)
+                _fundamentals_mtime_ns = st.st_mtime_ns
+            except Exception:
+                return None
+        entry = _fundamentals_cache.get(symbol.strip().upper())
+        return dict(entry) if entry is not None else None
 
 
 def _load_disk_catalog_meta(symbol: str) -> dict[str, Any] | None:
@@ -581,6 +632,16 @@ def stock_info(request: Request, ticker: str = "AAPL"):
                     else info_dict.get("peRatio")
                 )
 
+        pe_source: str | None = "live" if pe_ratio is not None else None
+        pe_updated_at: str | None = None
+        if pe_ratio is None:
+            disk_fund = _load_disk_fundamentals_entry(ticker)
+            if disk_fund is not None:
+                pe_ratio = _finite_number(disk_fund.get("pe_ttm"))
+                if pe_ratio is not None:
+                    pe_source = "offline_batch"
+                    pe_updated_at = str(disk_fund.get("updated_at") or "") or None
+
         if not has_fast_metrics and not info_dict:
             raise RuntimeError(f"No fundamentals returned for {ticker}")
 
@@ -670,6 +731,8 @@ def stock_info(request: Request, ticker: str = "AAPL"):
             "marketCapCurrencySymbol": market_cap_currency_symbol,
             "marketCap": market_cap,
             "peRatio": pe_ratio,
+            "peSource": pe_source,
+            "peUpdatedAt": pe_updated_at,
             "fiftyTwoWeekHigh": high_52w,
             "fiftyTwoWeekLow": low_52w,
             "avgVolume": avg_vol,

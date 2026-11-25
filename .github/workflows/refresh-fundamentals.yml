@@ -1,0 +1,57 @@
+name: Refresh Universe Fundamentals
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly Sunday 06:15 UTC offline P/E (TTM) batch refresh (outside live request paths).
+    - cron: "15 6 * * 0"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: refresh-universe-fundamentals
+  cancel-in-progress: false
+
+jobs:
+  refresh-pe:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'schedule' && vars.FUNDAMENTALS_REFRESH_ENABLED == 'true')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install locked backend runtime via uv
+        run: |
+          python -m pip install --upgrade pip
+          pip install --no-cache-dir uv==0.11.16
+          uv lock --project backend --check
+          uv sync --project backend --locked --no-dev --no-install-project
+      - name: Refresh 286-ticker trailing P/E snapshot
+        run: backend/.venv/bin/python scripts/refresh_universe_pe.py --workers 6
+      - name: Open or update refresh PR if snapshot changed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if git diff --quiet backend/data/universe_fundamentals.json; then
+            echo "No changes to backend/data/universe_fundamentals.json"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B chore/refresh-universe-pe
+          git add backend/data/universe_fundamentals.json
+          git commit -m "chore(data): refresh offline 286-ticker P/E (TTM) fundamentals"
+          git push --force-with-lease origin chore/refresh-universe-pe
+          if ! gh pr view chore/refresh-universe-pe >/dev/null 2>&1; then
+            gh pr create \
+              --base main \
+              --head chore/refresh-universe-pe \
+              --title "chore(data): refresh offline P/E (TTM) fundamentals" \
+              --body "Automated offline batch refresh of \`backend/data/universe_fundamentals.json\`."
+          fi
