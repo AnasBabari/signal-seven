@@ -153,8 +153,17 @@ def causal_log_har_forecasts(
     refit_every: int = 5,
     ridge: float = 1e-4,
     latest_only: bool = False,
+    smearing: bool = True,
+    smearing_exp_cap: float = 50.0,
+    smearing_max: float = 8.0,
 ) -> np.ndarray:
-    """Return causal cumulative variance forecasts matching exact ``refit_every`` cutoffs."""
+    """Return causal cumulative variance forecasts matching exact ``refit_every`` cutoffs.
+
+    When ``smearing=True`` (default), applies strictly in-sample causal Duan (1983)
+    log-normal smearing ``E[exp(resid)]`` capped at ``smearing_exp_cap`` per observation
+    and ``[1.0, smearing_max]`` overall so exponentiated log-variance forecasts estimate
+    arithmetic conditional variance rather than the geometric mean.
+    """
     if not horizons or min(horizons) < 1:
         raise ValueError("horizons must contain positive integers")
     if refit_every < 1:
@@ -217,6 +226,13 @@ def causal_log_har_forecasts(
         x_fit = np.column_stack((np.ones(d1.size, dtype=np.float64), d1, d2, d3))
         y_fit = np.log(safe_clean[22 : 22 + cutoff][valid_rows])
         coefficients = np.linalg.solve(x_fit.T @ x_fit + penalty, x_fit.T @ y_fit)
+        smear = 1.0
+        if smearing:
+            resid = y_fit - x_fit @ coefficients
+            raw_smear = float(
+                np.mean(np.minimum(np.exp(np.clip(resid, -20.0, 10.0)), float(smearing_exp_cap)))
+            )
+            smear = float(np.clip(raw_smear, 1.0, float(smearing_max)))
 
         buf = np.empty(22 + maximum_horizon, dtype=np.float64)
         buf[:22] = safe_clean[n - 22 : n]
@@ -235,7 +251,7 @@ def causal_log_har_forecasts(
                 + c2 * float(np.log(np.mean(buf[end - 5 : end])))
                 + c3 * float(np.log(np.mean(buf[end - 22 : end])))
             )
-            next_variance = max(float(np.exp(np.clip(log_pred, -30.0, 5.0))), 1e-12)
+            next_variance = max(smear * float(np.exp(np.clip(log_pred, -30.0, 5.0))), 1e-12)
             buf[end] = next_variance
             cumulative += next_variance
             if step in horizon_to_column:
@@ -258,7 +274,19 @@ def causal_log_har_forecasts(
 
     refit_pos = np.asarray(refit_origins_list, dtype=np.int64) - 22
     all_coefs = np.linalg.solve(xtx_cum[refit_pos] + penalty, xty_cum[refit_pos, :, None])[..., 0]
+    smear_factors = np.ones(len(refit_pos), dtype=np.float64)
+    if smearing:
+        cap = float(smearing_exp_cap)
+        s_max = float(smearing_max)
+        for r_idx, rp in enumerate(refit_pos):
+            cutoff = int(rp) + 1
+            v_mask = train_valid[:cutoff]
+            resid = y_all[:cutoff][v_mask] - x_all[:cutoff][v_mask] @ all_coefs[r_idx]
+            raw_smear = float(np.mean(np.minimum(np.exp(np.clip(resid, -20.0, 10.0)), cap)))
+            smear_factors[r_idx] = float(np.clip(raw_smear, 1.0, s_max))
+
     origin_coefs = all_coefs[origin_refit_indices]
+    origin_smear = smear_factors[origin_refit_indices]
 
     m_eligible = eligible_origins.size
     buf = np.empty((m_eligible, 22 + maximum_horizon), dtype=np.float64)
@@ -276,7 +304,7 @@ def causal_log_har_forecasts(
             + c2_v * np.log(np.mean(buf[:, end - 5 : end], axis=1))
             + c3_v * np.log(np.mean(buf[:, end - 22 : end], axis=1))
         )
-        next_var = np.maximum(np.exp(np.clip(log_pred, -30.0, 5.0)), 1e-12)
+        next_var = np.maximum(origin_smear * np.exp(np.clip(log_pred, -30.0, 5.0)), 1e-12)
         buf[:, end] = next_var
         cumulative_vec += next_var
         if step in horizon_to_column:

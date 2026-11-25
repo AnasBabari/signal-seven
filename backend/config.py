@@ -164,7 +164,9 @@ class Settings(BaseSettings):
     volatility_serving_required: bool = False
     volatility_forecast_cache_ttl: int = Field(default=900, ge=0, le=86400)
     volatility_news_provider_enabled: bool = False
-    volatility_default_policy: Literal["v3_baseline", "v4_g3_h5", "v4_g3"] = "v3_baseline"
+    volatility_default_policy: Literal["v3_baseline", "v4_g3_h5", "v4_g3", "v5_duan_har"] = (
+        "v5_duan_har"
+    )
     s3_endpoint_url: str | None = None
     s3_bucket: str | None = None
     s3_key_prefix: str = "artifacts"

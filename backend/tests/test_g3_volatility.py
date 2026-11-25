@@ -307,11 +307,11 @@ def test_auto_policy_still_routes_to_baselines():
 
     assert dict(AUTO_MODEL_POLICY) == {
         1: "garch_11",
-        5: "rolling_mean",
-        10: "rolling_mean",
-        20: "rolling_mean",
+        5: "har_rv",
+        10: "har_rv",
+        20: "har_rv",
     }
-    assert _candidate_name("auto", 5) == "rolling_mean"
+    assert _candidate_name("auto", 5) == "har_rv"
     assert _candidate_name("gpu_g3", 5) == "gpu_g3"
 
 

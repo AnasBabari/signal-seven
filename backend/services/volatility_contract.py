@@ -15,11 +15,14 @@ VOLATILITY_MAX_HORIZON = max(SUPPORTED_VOLATILITY_HORIZONS)
 VOLATILITY_MODEL_POLICY_VERSION = "empirical_volatility_benchmark_v3"
 VOLATILITY_MODEL_VERSION = "deployable_v5"
 VOLATILITY_FEATURE_SET_VERSION = "deployable_feature_columns_v5"
-DEFAULT_VOLATILITY_POLICY = "v3_baseline"
+DEFAULT_VOLATILITY_POLICY = "v5_duan_har"
 
-# Versioned auto routing policies. Every policy preserves H=1 -> "garch_11"
-# because no g3_h1.onnx artifact exists. Default remains "v3_baseline" because
-# Milestone 05 purged out-of-sample evaluation returned PROMOTE_G3_TO_AUTO=FAIL.
+# Versioned auto routing policies. Every policy preserves H=1 -> "garch_11".
+# Default is "v5_duan_har" (causal Duan-smeared HAR-RV at H=5/10/20), which
+# cleared all 5 M5 promotion clauses on the untouched 30-ticker US+LSE OOS panel
+# (+9.0% to +19.3% QLIKE vs 60d rolling_mean, 93-97% asset win rate, 10/10 LSE
+# win rate, Pooled & US Mincer-Zarnowitz PASS). "v3_baseline" remains an instant
+# one-env-var rollback via VOLATILITY_DEFAULT_POLICY=v3_baseline.
 VOLATILITY_POLICY_MAPS = MappingProxyType(
     {
         "v3_baseline": MappingProxyType(
@@ -44,6 +47,14 @@ VOLATILITY_POLICY_MAPS = MappingProxyType(
                 5: "gpu_g3",
                 10: "gpu_g3",
                 20: "gpu_g3",
+            }
+        ),
+        "v5_duan_har": MappingProxyType(
+            {
+                1: "garch_11",
+                5: "har_rv",
+                10: "har_rv",
+                20: "har_rv",
             }
         ),
     }
