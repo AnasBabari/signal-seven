@@ -127,41 +127,41 @@ const lastPricePlugin = {
   },
 };
 
-// Subtle vertical anchor separator & glowing anchor dot at latest close
+// Horizontal dotted anchor baseline & solid circular dot where history meets estimate
 const forecastRegionPlugin = {
   id: 't212ForecastRegion',
   afterDatasetsDraw: (chart) => {
     const { ctx, chartArea, scales } = chart;
-    const splitIdx = chart.options.plugins?.t212ForecastRegion?.splitIndex;
-    if (splitIdx == null || !scales.x || !chartArea) return;
+    const cfg = chart.options.plugins?.t212ForecastRegion;
+    const splitIdx = cfg?.splitIndex;
+    if (splitIdx == null || !scales.x || !scales.y || !chartArea) return;
     const xPos = scales.x.getPixelForValue(splitIdx);
     if (xPos == null || xPos < chartArea.left || xPos > chartArea.right) return;
+
+    const historyData = chart.data?.datasets?.[0]?.data;
+    const rawAnchor = cfg?.anchorValue ?? (Array.isArray(historyData) ? historyData[splitIdx] : null);
+    const anchorVal = Number(rawAnchor);
+    if (!Number.isFinite(anchorVal)) return;
+    const yPos = scales.y.getPixelForValue(anchorVal);
+    if (yPos < chartArea.top || yPos > chartArea.bottom) return;
+
+    const dotColor = chart.data?.datasets?.[0]?.borderColor || '#9ca3af';
     ctx.save();
+    // Subtle full-width horizontal dotted baseline aligned with the anchor dot
     ctx.beginPath();
-    ctx.setLineDash([3, 4]);
-    ctx.strokeStyle = 'rgba(148, 163, 184, 0.22)';
-    ctx.lineWidth = 1;
-    ctx.moveTo(xPos, chartArea.top);
-    ctx.lineTo(xPos, chartArea.bottom);
+    ctx.setLineDash([2, 6]);
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.24)';
+    ctx.lineWidth = 1.25;
+    ctx.moveTo(chartArea.left, yPos);
+    ctx.lineTo(chartArea.right, yPos);
     ctx.stroke();
     ctx.setLineDash([]);
 
-    const historyData = chart.data?.datasets?.[0]?.data;
-    const anchorVal = Array.isArray(historyData) ? historyData[splitIdx] : null;
-    if (Number.isFinite(anchorVal) && scales.y) {
-      const yPos = scales.y.getPixelForValue(anchorVal);
-      if (yPos >= chartArea.top && yPos <= chartArea.bottom) {
-        const dotColor = chart.data?.datasets?.[0]?.borderColor || '#38bdf8';
-        ctx.beginPath();
-        ctx.arc(xPos, yPos, 6, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(56, 189, 248, 0.18)';
-        ctx.fill();
-        ctx.beginPath();
-        ctx.arc(xPos, yPos, 3, 0, Math.PI * 2);
-        ctx.fillStyle = dotColor;
-        ctx.fill();
-      }
-    }
+    // Crisp solid circular anchor dot at the transition point
+    ctx.beginPath();
+    ctx.arc(xPos, yPos, 4.5, 0, Math.PI * 2);
+    ctx.fillStyle = dotColor;
+    ctx.fill();
     ctx.restore();
   },
 };
@@ -394,17 +394,17 @@ export default function PriceChart({
   const colors = useMemo(() => {
     const up = stats.up;
     return {
-      line: up ? '#16c784' : '#ff4d4f',
-      areaTop: up ? 'rgba(22, 199, 132, 0.16)' : 'rgba(255, 77, 79, 0.15)',
-      grid: 'rgba(255,255,255,0.03)',
-      tick: '#7c879b',
-      tooltipBg: '#131722',
-      tooltipTitle: '#f1f5f9',
+      line: up ? '#22c55e' : '#ef4444',
+      areaTop: up ? 'rgba(34, 197, 94, 0.14)' : 'rgba(239, 68, 68, 0.13)',
+      grid: 'rgba(255, 255, 255, 0.06)',
+      tick: '#8e939e',
+      tooltipBg: '#1e2026',
+      tooltipTitle: '#f3f4f6',
       tooltipBody: '#cbd5e1',
-      tooltipBorder: 'rgba(255,255,255,0.08)',
-      estimate: '#38bdf8',
-      bandBorder: 'rgba(56, 189, 248, 0.22)',
-      bandFill: 'rgba(56, 189, 248, 0.09)',
+      tooltipBorder: 'rgba(255, 255, 255, 0.10)',
+      estimate: '#7dd3fc',
+      bandBorder: 'rgba(125, 211, 252, 0.18)',
+      bandFill: 'rgba(125, 211, 252, 0.06)',
     };
   }, [stats.up]);
 
@@ -413,7 +413,7 @@ export default function PriceChart({
     const historyPadded = [...points.prices];
     const datasets = [];
 
-    // Main historical price dataset
+    // Main historical price dataset — sharp angular zero-tension polyline with clean cutoff gradient
     datasets.push({
       role: 'history',
       label: 'Price',
@@ -424,17 +424,18 @@ export default function PriceChart({
         if (!chartArea) return colors.areaTop;
         const grad = ctx.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
         grad.addColorStop(0, colors.areaTop);
+        grad.addColorStop(0.85, 'rgba(255, 255, 255, 0)');
         grad.addColorStop(1, 'transparent');
         return grad;
       },
-      borderWidth: 2,
+      borderWidth: 1.9,
       pointRadius: 0,
-      pointHoverRadius: 5,
+      pointHoverRadius: 4.5,
       pointHoverBackgroundColor: colors.line,
-      pointHoverBorderColor: '#0b0e14',
-      pointHoverBorderWidth: 2,
-      tension: 0.08,
-      fill: true,
+      pointHoverBorderColor: '#181a1f',
+      pointHoverBorderWidth: 1.5,
+      tension: 0,
+      fill: 'start',
       spanGaps: false,
     });
 
@@ -465,7 +466,7 @@ export default function PriceChart({
           pointRadius: 0,
           pointHoverRadius: 0,
           pointHitRadius: 0,
-          tension: 0.08,
+          tension: 0,
           fill: '+1',
           spanGaps: false,
         });
@@ -480,7 +481,7 @@ export default function PriceChart({
           pointRadius: 0,
           pointHoverRadius: 0,
           pointHitRadius: 0,
-          tension: 0.08,
+          tension: 0,
           fill: false,
           spanGaps: false,
         });
@@ -492,14 +493,14 @@ export default function PriceChart({
         data: padAnchoredForecast(estimate.series, anchorClose, forecastSplitIndex),
         borderColor: colors.estimate,
         backgroundColor: 'transparent',
-        borderWidth: 2,
+        borderWidth: 1.9,
         borderDash: [6, 4],
         pointRadius: 0,
-        pointHoverRadius: 5,
+        pointHoverRadius: 4.5,
         pointHoverBackgroundColor: colors.estimate,
-        pointHoverBorderColor: '#0b0e14',
-        pointHoverBorderWidth: 2,
-        tension: 0.08,
+        pointHoverBorderColor: '#181a1f',
+        pointHoverBorderWidth: 1.5,
+        tension: 0,
         fill: false,
         spanGaps: false,
       });
@@ -735,12 +736,12 @@ export default function PriceChart({
       },
       plugins: {
         legend: { display: false },
-        t212ForecastRegion: { splitIndex },
+        t212ForecastRegion: { splitIndex, anchorValue: latestClosePrice },
         t212LastPrice: canShowForecastOverlay
           ? undefined
           : {
             value: latestClosePrice,
-            color: stats.change > 0 ? '#16c784' : stats.change < 0 ? '#ff4d4f' : '#94a3b8',
+            color: stats.change > 0 ? '#22c55e' : stats.change < 0 ? '#ef4444' : '#9ca3af',
             label: formatMoneyLocal(latestClosePrice, currencySymbol),
           },
         tooltip: {
@@ -802,15 +803,20 @@ export default function PriceChart({
         },
         y: {
           ...yBounds,
-          position: 'right',
+          position: 'left',
           border: { display: false },
           ticks: {
             color: colors.tick,
-            maxTicksLimit: 5,
+            maxTicksLimit: 4,
+            padding: 10,
             font: { family: 'Inter, system-ui, sans-serif', size: 11 },
             callback: (v) => formatMoneyLocal(Number(v), currencySymbol),
           },
-          grid: { display: false },
+          grid: {
+            display: true,
+            color: colors.grid,
+            drawTicks: false,
+          },
         },
       },
     };

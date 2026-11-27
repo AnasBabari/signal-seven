@@ -313,7 +313,7 @@ it('lazily fetches /api/v1/intraday when user clicks 24H and history has intrada
   expect(lastChartProps.data.labels).toHaveLength(6);
 });
 
-it('renders Trading 212 bottom range bar below canvas with crisp low-tension line and no heavy gridlines', () => {
+it('renders Trading 212 bottom range bar below canvas with crisp zero-tension polyline, faint horizontal gridlines, and dotted anchor baseline', () => {
   usePriceHistory.mockReturnValue({ history: historyFixture(300, true), loading: false, error: '', retry: vi.fn() });
   const { container } = render(<PriceChart ticker="MSFT" currencySymbol="$" forecast={forecastFixture} />);
 
@@ -326,12 +326,49 @@ it('renders Trading 212 bottom range bar below canvas with crisp low-tension lin
   expect(bottomBar.querySelector('.t212-range-tabs')).not.toBeNull();
   expect(bottomBar.querySelector('.table-toggle-btn')).not.toBeNull();
 
-  // Crisp Trading 212 line tension & clean canvas (no horizontal gridlines)
+  // Sharp zero-tension angular polyline matching reference display
   const historyDs = lastChartProps.data.datasets.find((ds) => ds.role === 'history');
   const midpointDs = lastChartProps.data.datasets.find((ds) => ds.role === 'midpoint');
-  expect(historyDs.tension).toBeLessThanOrEqual(0.1);
-  expect(midpointDs.tension).toBeLessThanOrEqual(0.1);
-  expect(lastChartProps.options.scales.y.grid.display).toBe(false);
+  const bandUpperDs = lastChartProps.data.datasets.find((ds) => ds.role === 'band-upper');
+  const bandLowerDs = lastChartProps.data.datasets.find((ds) => ds.role === 'band-lower');
+  expect(historyDs.tension).toBe(0);
+  expect(midpointDs.tension).toBe(0);
+  expect(bandUpperDs.tension).toBe(0);
+  expect(bandLowerDs.tension).toBe(0);
+
+  // Subtle horizontal reference gridlines + horizontal dotted anchor baseline with solid dot
+  expect(lastChartProps.options.scales.y.grid.display).toBe(true);
+  expect(lastChartProps.options.plugins.t212ForecastRegion.anchorValue).toBe(399);
+
+  const regionPlugin = lastChartProps.plugins.find((p) => p.id === 't212ForecastRegion');
+  const calls = [];
+  const fakeCtx = {
+    save: () => {},
+    restore: () => {},
+    beginPath: () => {},
+    setLineDash: (d) => calls.push(['dash', d]),
+    moveTo: (x, y) => calls.push(['moveTo', x, y]),
+    lineTo: (x, y) => calls.push(['lineTo', x, y]),
+    stroke: () => calls.push(['stroke']),
+    arc: (x, y, r) => calls.push(['arc', x, y, r]),
+    fill: () => calls.push(['fill']),
+  };
+  regionPlugin.afterDatasetsDraw({
+    ctx: fakeCtx,
+    chartArea: { left: 20, right: 420, top: 10, bottom: 260 },
+    scales: {
+      x: { getPixelForValue: () => 280 },
+      y: { getPixelForValue: () => 120 },
+    },
+    data: lastChartProps.data,
+    options: lastChartProps.options,
+  });
+  // Draws horizontal dotted baseline across chartArea.left..right at anchor y=120 (no vertical wall)
+  expect(calls).toContainEqual(['moveTo', 20, 120]);
+  expect(calls).toContainEqual(['lineTo', 420, 120]);
+  expect(calls).not.toContainEqual(['moveTo', 280, 10]);
+  // Draws solid circular anchor dot at (280, 120)
+  expect(calls.some((c) => c[0] === 'arc' && c[1] === 280 && c[2] === 120 && c[3] >= 4)).toBe(true);
 });
 
 it('scrubs hero price, delta, date, and estimate range live on hover and resets on pointer leave', () => {
