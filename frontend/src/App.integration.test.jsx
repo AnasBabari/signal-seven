@@ -1,6 +1,6 @@
 import React from 'react';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import App from './App';
 import { clearPriceHistoryCache } from './api/priceHistoryClient';
@@ -197,8 +197,9 @@ describe('simplified forecast app', () => {
 
   it('first render opens to a minimal screen with empty input, disabled button, and no results or skeletons', async () => {
     const { container } = render(<App />);
-    expect(screen.getByRole('heading', { name: /which stock would you like to explore\?/i })).toBeInTheDocument();
-    const input = screen.getByLabelText(/stock ticker/i);
+    const main = within(screen.getByRole('main'));
+    expect(main.getByRole('heading', { name: /which stock would you like to explore\?/i })).toBeInTheDocument();
+    const input = main.getByLabelText(/stock ticker/i);
     expect(input).toHaveValue('');
     expect(input).toHaveAttribute('placeholder', 'Enter a ticker or company name');
     const button = screen.getByRole('button', { name: /view outlook/i });
@@ -822,13 +823,13 @@ describe('simplified forecast app', () => {
 
     await user.click(screen.getByRole('tab', { name: /news/i }));
     await user.click(await screen.findByRole('button', { name: /show more stories/i }));
-    expect(screen.getByText('MSFT Headline 6')).toBeInTheDocument();
+    expect(screen.getByText('MSFT Headline 1')).toBeInTheDocument();
 
     await user.clear(input);
     await user.type(input, 'NVDA');
     await user.click(screen.getByRole('button', { name: /view outlook/i }));
-    expect(await screen.findByText('NVDA Headline 1')).toBeInTheDocument();
-    expect(screen.queryByText('NVDA Headline 6')).not.toBeInTheDocument();
+    expect(await screen.findByText('NVDA Headline 6')).toBeInTheDocument();
+    expect(screen.queryByText('NVDA Headline 1')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /show more stories \(1 more\)/i })).toBeInTheDocument();
   });
 
@@ -959,5 +960,155 @@ describe('simplified forecast app', () => {
     await user.click(screen.getByRole('button', { name: /Headlines \(1\)/i }));
     expect(screen.getByText('Microsoft Cloud Revenue Beats Quarterly Estimates')).toBeInTheDocument();
     expect(screen.queryByText('Annual Report Pursuant to Section 13 or 15(d)')).not.toBeInTheDocument();
+  });
+
+  it('preserves the ticker input and previews the three newest distinct news items and filings', async () => {
+    const baseFetch = global.fetch;
+    const filingUrl = 'https://www.sec.gov/example-8k';
+    let newsCalls = 0;
+    global.fetch = vi.fn((url, init) => {
+      if (String(url).includes('/api/v1/news')) {
+        newsCalls += 1;
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            ticker: 'MSFT',
+            status: 'available',
+            provider: 'yahoo',
+            items: [
+              { id: 'n3', title: 'Azure margin outlook remains steady', source: 'CNBC', published_at: '2026-09-01T12:00:00Z', sentiment: 0.12, sentiment_label: 'bullish' },
+              { id: 'n4', title: 'Headline without a usable date', source: 'WSJ', published_at: 'invalid', sentiment: 0.05 },
+              { id: 'n2', title: 'Enterprise Copilot seats surpass milestone', source: 'Bloomberg', published_at: '2026-09-03T16:00:00Z', sentiment: 0.35 },
+              { id: 'n1', title: 'Microsoft AI cloud demand accelerates', source: 'Reuters', published_at: '2026-09-03T10:30:00-06:00', sentiment: 0.48 },
+              { id: 'feed-s1', title: 'Current Report (Form 8-K)', url: filingUrl, published_at: 'invalid', filing_date: '2026-09-02', sentiment: -1 },
+            ],
+            sec_filings: [
+              { id: 's1', form: '8-K', title: 'Older copy of the filing', url: filingUrl, filing_date: '2026-08-30' },
+            ],
+          }),
+        });
+      }
+      return baseFetch(url, init);
+    });
+
+    const user = userEvent.setup();
+    const { container } = render(<App />);
+    await screen.findByText('Forecast service reachable');
+
+    const inputBefore = screen.getByLabelText(/stock ticker/i);
+    await user.type(inputBefore, 'MSFT');
+    await user.click(screen.getByRole('button', { name: /view outlook/i }));
+    await screen.findByText(/Range midpoint — experimental:/i);
+
+    // Only the results are in the active main landmark. The search input stays mounted.
+    expect(container.querySelector('.topbar .stock-search-form')).not.toBeNull();
+    expect(screen.getByLabelText(/stock ticker/i)).toBe(inputBefore);
+    expect(screen.getByRole('main')).toContainElement(screen.getByLabelText('MSFT price chart'));
+    expect(screen.getByRole('main')).not.toContainElement(inputBefore);
+
+    const preview = within(await screen.findByLabelText('MSFT latest financial news'));
+    expect(await preview.findByText('Positive sentiment')).toBeVisible();
+    expect(preview.getByText('Not included in the forecast')).toBeVisible();
+    expect(preview.getAllByRole('heading', { level: 3 }).map((heading) => heading.textContent.trim())).toEqual([
+      'Microsoft AI cloud demand accelerates',
+      'Enterprise Copilot seats surpass milestone',
+      'Current Report (Form 8-K) ↗',
+    ]);
+    expect(preview.getByText('SEC 8-K')).toBeVisible();
+
+    const callsBeforeSwitch = newsCalls;
+    preview.getByRole('button', { name: /view all news/i }).focus();
+    await user.keyboard('{Enter}');
+    const newsTab = screen.getByRole('tab', { name: 'News (5)' });
+    expect(newsTab).toHaveAttribute('aria-selected', 'true');
+    expect(newsTab).toHaveFocus();
+    const newsPanel = within(screen.getByRole('tabpanel', { name: 'News (5)' }));
+    expect(newsPanel.getByRole('button', { name: 'SEC Filings (1)' })).toBeVisible();
+    const headlines = newsPanel.getAllByRole('listitem');
+    expect(headlines[3]).toHaveTextContent('Azure margin outlook remains steady');
+    expect(headlines[3]).toHaveTextContent('Neutral tone');
+    expect(headlines[4]).toHaveTextContent('Headline without a usable date');
+    expect(newsCalls).toBe(callsBeforeSwitch);
+  });
+
+  function mockNews(items, secFilings = []) {
+    const baseFetch = global.fetch;
+    global.fetch = vi.fn((url, init) => {
+      if (String(url).includes('/api/v1/news')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ ticker: 'MSFT', status: 'available', items, sec_filings: secFilings }),
+        });
+      }
+      if (String(url).includes('/api/v1/forecast?')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            ...forecast,
+            news_context: { status: 'available', sentiment_label: 'bullish', headline_count: 1, mean_compound: 0.8 },
+          }),
+        });
+      }
+      return baseFetch(url, init);
+    });
+  }
+
+  it.each([
+    [0.15, '0.01', 'Positive sentiment'],
+    [0.15, '0.00998', 'Neutral sentiment'],
+    [-0.15, '-0.01', 'Negative sentiment'],
+    [-0.15, '-0.00998', 'Neutral sentiment'],
+  ])('uses the unrounded mean of %s and %s for %s', async (sentiment, compound, expected) => {
+    mockNews([
+      { id: 'scored-1', title: 'Headline at the tone threshold', sentiment, sentiment_badge: 'Bullish' },
+      { id: 'scored-2', title: 'Headline with a compound score', sentiment: { compound } },
+      ...[undefined, true, ' ', '0x1', [], 1.01, -1.01].map((score, index) => ({
+        id: `unscored-${index}`, title: `Unscored headline ${index}`, sentiment: score, sentiment_label: 'bullish',
+      })),
+    ]);
+    window.history.replaceState(null, '', '/?ticker=MSFT');
+    render(<App />);
+    const preview = within(await screen.findByLabelText('MSFT latest financial news'));
+    expect(await preview.findByText(expected)).toBeVisible();
+    const headlines = preview.getAllByRole('listitem');
+    expect(headlines[0]).toHaveTextContent('Neutral tone');
+    expect(headlines[2]).not.toHaveTextContent(/tone/i);
+  });
+
+  it('keeps separate filings that link to the same EDGAR company page', async () => {
+    const url = 'https://www.sec.gov/edgar/browse/?CIK=0000789019';
+    mockNews([], [
+      { id: 'sec-1', title: 'Quarterly results', form: '10-Q', url },
+      { id: 'sec-2', title: 'Current report', form: '8-K', url },
+    ]);
+    window.history.replaceState(null, '', '/?ticker=MSFT');
+    render(<App />);
+    const preview = within(await screen.findByLabelText('MSFT latest financial news'));
+    expect(await preview.findByRole('link', { name: /quarterly results/i })).toBeVisible();
+    expect(preview.getByRole('link', { name: /current report/i })).toBeVisible();
+  });
+
+  it('keeps a mean at the aggregate threshold despite cancellation between headline scores', async () => {
+    mockNews([-0.9, 0.08, 0.24, 0.9].map((sentiment, index) => ({
+      id: `scored-${index}`, title: `Scored headline ${index}`, sentiment,
+    })));
+    window.history.replaceState(null, '', '/?ticker=MSFT');
+    render(<App />);
+    const preview = within(await screen.findByLabelText('MSFT latest financial news'));
+    expect(await preview.findByText('Positive sentiment')).toBeVisible();
+  });
+
+  it.each([
+    ['filings only', [], [{ id: '8-k', title: 'Termination of Agreement', form: '8-K', sentiment: 0.7717 }]],
+    ['unscored headlines', [{ id: 'headline', title: 'Company statement', sentiment_label: 'bullish' }], []],
+  ])('omits forecast sentiment when the loaded feed contains %s', async (_, items, filings) => {
+    mockNews(items, filings);
+    window.history.replaceState(null, '', '/?ticker=MSFT');
+    render(<App />);
+    await screen.findByText(/Range midpoint — experimental:/i);
+    const preview = within(await screen.findByLabelText('MSFT latest financial news'));
+    expect(await preview.findByRole('listitem')).toBeVisible();
+    expect(preview.queryByText(/sentiment|tone/i)).not.toBeInTheDocument();
+    expect(preview.getByText('Not included in the forecast')).toBeVisible();
   });
 });

@@ -16,10 +16,12 @@ import hashlib
 import inspect
 import json
 import logging
+import re
 import threading
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from statistics import fmean
 from typing import Any
 from urllib.parse import urlparse
 
@@ -35,6 +37,12 @@ _negative_cache: TTLCache = TTLCache(maxsize=256, ttl=60)
 _cik_cache: TTLCache = TTLCache(maxsize=256, ttl=3600)
 _cik_negative_cache: TTLCache = TTLCache(maxsize=256, ttl=60)
 _lock = threading.RLock()
+
+# An EDGAR accession directory can contain a filing index, a primary document and exhibits.
+_SEC_ARCHIVE_ACCESSION = re.compile(
+    r"https?://(?:www\.)?sec\.gov/Archives/edgar/data/(\d+)/(\d{18}|\d{10}-\d{2}-\d{6})(?:/|[?#]|$)",
+    re.IGNORECASE,
+)
 
 _http_client: httpx.Client | None = None
 _http_client_lock = threading.Lock()
@@ -296,6 +304,22 @@ def _safe_url(value: object) -> str | None:
     return candidate if parsed.scheme in ("https", "http") and parsed.netloc else None
 
 
+def _headline_sentiment(compound: float) -> tuple[str, str]:
+    if compound > 0.15:
+        return "positive", "Bullish"
+    if compound < -0.15:
+        return "negative", "Bearish"
+    return "neutral", "Neutral"
+
+
+def _publication_instant(item: dict[str, Any]) -> datetime | None:
+    try:
+        instant = datetime.fromisoformat(str(item.get("published_at") or "").strip())
+    except ValueError:
+        return None
+    return instant if instant.tzinfo is not None else instant.replace(tzinfo=UTC)
+
+
 def _format_news_item(
     *,
     identifier: str | None = None,
@@ -334,16 +358,7 @@ def _format_news_item(
     sentiment_target = f"{clean_title}. {clean_summary}" if clean_summary else clean_title
     scores = _sentiment.polarity_scores(sentiment_target)
     compound = float(scores["compound"])
-
-    if compound > 0.15:
-        label = "positive"
-        badge = "Bullish"
-    elif compound < -0.15:
-        label = "negative"
-        badge = "Bearish"
-    else:
-        label = "neutral"
-        badge = "Neutral"
+    label, badge = _headline_sentiment(compound)
 
     if not identifier:
         identifier = hashlib.sha256(f"{clean_title}\0{pub_iso}".encode()).hexdigest()[:16]
@@ -434,7 +449,9 @@ def _fetch_from_yahoo(symbol: str) -> list[dict[str, Any]]:
     for article in raw_news:
         if not isinstance(article, dict):
             continue
-        content = article.get("content") if isinstance(article.get("content"), dict) else {}
+        content = article.get("content")
+        if not isinstance(content, dict):
+            content = {}
         title = str(
             content.get("title") or article.get("headline") or article.get("title") or ""
         ).strip()
@@ -497,7 +514,7 @@ def _format_sec_filings(
     symbol: str, cik: str, raw_records: list[dict[str, str]]
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
-    for rec in raw_records[:5]:
+    for rec in raw_records:
         form = rec["form"]
         acc_time = rec["published_at"]
         acc_num = rec["accession_number"]
@@ -590,8 +607,8 @@ def _fetch_from_sec_edgar(symbol: str, *, timeout_seconds: float = 4.0) -> list[
         filing_date = str(filing_dates[i] if i < len(filing_dates) else "").strip()
         if not filing_date and acc_time:
             filing_date = acc_time[:10]
-        acc_num = str(accession_numbers[i] if i < len(accession_numbers) else "").strip()
-        primary_doc = str(primary_docs[i] if i < len(primary_docs) else "").strip()
+        acc_num = str((accession_numbers[i] if i < len(accession_numbers) else "") or "").strip()
+        primary_doc = str((primary_docs[i] if i < len(primary_docs) else "") or "").strip()
         desc = str(descriptions[i] if i < len(descriptions) else form).strip() or form
         raw_item_code = str(items_list[i] if i < len(items_list) else "").strip()
 
@@ -605,10 +622,11 @@ def _fetch_from_sec_edgar(symbol: str, *, timeout_seconds: float = 4.0) -> list[
             if matched:
                 item_detail = f" ({', '.join(matched)})"
 
-        if acc_num and primary_doc:
+        if acc_num:
             acc_compact = acc_num.replace("-", "")
+            document = primary_doc or f"{acc_num}-index.htm"
             filing_url = (
-                f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_compact}/{primary_doc}"
+                f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_compact}/{document}"
             )
         else:
             filing_url = f"https://www.sec.gov/edgar/browse/?CIK={cik}"
@@ -624,8 +642,6 @@ def _fetch_from_sec_edgar(symbol: str, *, timeout_seconds: float = 4.0) -> list[
                 "url": filing_url,
             }
         )
-        if len(raw_records) >= 5:
-            break
 
     with _lock:
         _cik_cache[cik] = raw_records
@@ -772,10 +788,9 @@ def fetch_recent_news(
     # 3. Try SEC EDGAR fallback
     if not items and _remaining() > 0.02:
         try:
-            items = _call_sec_edgar(symbol, _remaining())
-            if items:
+            sec_filings = _call_sec_edgar(symbol, _remaining())
+            if sec_filings:
                 provider_used = "sec_edgar"
-                sec_filings = [dict(it) for it in items[:5]]
         except Exception as exc:
             logger.info(
                 "SEC EDGAR news fetch failed for %s (%s); falling back to cached archive",
@@ -784,7 +799,7 @@ def fetch_recent_news(
             )
 
     # 4. Try Cached JSONL news archive fallback
-    if not items:
+    if not items and not sec_filings:
         try:
             items = _fetch_from_cache(symbol)
             if items:
@@ -796,7 +811,7 @@ def fetch_recent_news(
     if not sec_filings and not symbol.endswith(".L"):
         if include_sec_filings and _remaining() > 0.05:
             try:
-                sec_filings = _call_sec_edgar(symbol, _remaining())[:5]
+                sec_filings = _call_sec_edgar(symbol, _remaining())
             except Exception as exc:
                 logger.info("SEC EDGAR filing enrichment skipped for %s (%s)", symbol, exc)
         else:
@@ -805,25 +820,23 @@ def fetch_recent_news(
                 with _lock:
                     cached_sec = _cik_cache.get(cik)
                 if cached_sec:
-                    sec_filings = _format_sec_filings(symbol, cik, cached_sec)[:5]
+                    sec_filings = _format_sec_filings(symbol, cik, cached_sec)
 
-    items.sort(key=lambda it: str(it.get("published_at") or ""), reverse=True)
+    headlines, sec_filings = _distinct_news_records(items, sec_filings)
+    top_filings = sec_filings[:5]
+    top_items = top_filings if provider_used == "sec_edgar" else headlines[:10]
 
     market_close_utc = get_exchange_market_close(symbol)
-    for it in (*items, *sec_filings):
-        pub_str = str(it.get("published_at") or "")
-        try:
-            pub_dt = datetime.fromisoformat(pub_str.replace("Z", "+00:00")).astimezone(UTC)
-            if market_close_utc is not None:
-                is_after = pub_dt > market_close_utc
-                it["after_market_close"] = is_after
-                it["session_timing"] = "after_hours" if is_after else "regular_hours"
-        except Exception:
+    for it in (*top_items, *top_filings):
+        pub_dt = _publication_instant(it)
+        if pub_dt is None:
             it["after_market_close"] = False
             it["session_timing"] = "regular_hours"
+        elif market_close_utc is not None:
+            is_after = pub_dt > market_close_utc
+            it["after_market_close"] = is_after
+            it["session_timing"] = "after_hours" if is_after else "regular_hours"
 
-    top_items = items[:10]
-    top_filings = sec_filings[:5]
     has_content = bool(top_items or top_filings)
     result = {
         "status": "available" if has_content else "unavailable",
@@ -845,6 +858,160 @@ def fetch_recent_news(
         else:
             _negative_cache[symbol] = result
     return dict(result)
+
+
+def _news_item_keys(item: dict[str, Any]) -> set[tuple[str, ...]]:
+    keys = set()
+    identifier = str(item.get("id") or "").strip()
+    if identifier:
+        keys.add(("id", identifier))
+    url = str(item.get("url") or "").strip()
+    if url and not url.startswith("https://www.sec.gov/edgar/browse/"):
+        keys.add(("url", url))
+        archive = _SEC_ARCHIVE_ACCESSION.match(url)
+        if archive:
+            cik, accession = archive.groups()
+            keys.add(("edgar", cik.lstrip("0") or "0", accession.replace("-", "")))
+    if not keys:
+        title = str(item.get("title") or item.get("headline") or item.get("form") or "")
+        if title:
+            keys.add(
+                ("title", title, str(item.get("published_at") or item.get("filing_date") or ""))
+            )
+    return keys
+
+
+def _distinct_news_records(
+    items: list[dict[str, Any]], filings: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Collapse ID and document URL aliases, preserving authoritative filing metadata."""
+    records = [(item, True) for item in filings]
+    for item in items:
+        source = str(item.get("source") or "").strip().lower()
+        is_filing = (
+            item.get("kind") == "sec_filing"
+            or item.get("type") == "sec_filing"
+            or item.get("is_sec_filing") is True
+            or item.get("form")
+            or item.get("filing_type")
+            or str(item.get("provider") or "").strip().lower() == "sec_edgar"
+            or source == "sec"
+            or source.startswith("sec ")
+        )
+        records.append((item, bool(is_filing)))
+
+    # The feeds are small. Joining overlapping groups also handles a later record
+    # whose ID and URL connect two previously independent provider records.
+    groups: list[tuple[set[tuple[str, ...]], list[tuple[dict[str, Any], bool]]]] = []
+    for item, is_filing in records:
+        keys = _news_item_keys(item)
+        members = [(item, is_filing)]
+        for index in range(len(groups) - 1, -1, -1):
+            group_keys, group_members = groups[index]
+            if keys & group_keys:
+                keys.update(group_keys)
+                members = group_members + members
+                groups.pop(index)
+        groups.append((keys, members))
+
+    oldest = datetime.min.replace(tzinfo=UTC)
+    headlines, sec_filings = [], []
+    for _, members in groups:
+        filing_items = [item for item, is_filing in members if is_filing]
+        candidates = filing_items or [item for item, _ in members]
+        newest = max(candidates, key=lambda item: _publication_instant(item) or oldest)
+        (sec_filings if filing_items else headlines).append(newest)
+    for collection in (headlines, sec_filings):
+        collection.sort(key=lambda item: _publication_instant(item) or oldest, reverse=True)
+    return headlines, sec_filings
+
+
+def _extract_compound_score(item: dict[str, Any]) -> float | None:
+    raw = item.get("sentiment")
+    if isinstance(raw, dict):
+        raw = raw.get("compound")
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return val if -1.0 <= val <= 1.0 else None
+
+
+def summarize_cached_news_context(ticker: str) -> dict[str, Any]:
+    """Return a non-blocking aggregated news-sentiment summary from the warm cache.
+
+    Never initiates upstream network calls so ``GET /api/v1/forecast`` preserves
+    its cold latency SLO and M5-validated point/conformal predictions.
+    """
+    symbol = ticker.strip().upper()
+    with _lock:
+        cached = _cache.get(symbol)
+        neg_cached = _negative_cache.get(symbol) if cached is None else None
+
+    if cached is None:
+        return {
+            "status": "unavailable" if neg_cached is not None else "not_cached",
+            "sentiment_label": "unavailable",
+            "mean_compound": None,
+            "headline_count": 0,
+            "sec_filing_count": 0,
+            "bullish_count": 0,
+            "bearish_count": 0,
+            "neutral_count": 0,
+            "latest_published_at": None,
+            "provider": "none",
+            "used_in_point_model": False,
+        }
+
+    items = [it for it in (cached.get("items") or []) if isinstance(it, dict)]
+    sec_filings = [it for it in (cached.get("sec_filings") or []) if isinstance(it, dict)]
+
+    headlines, distinct_filings = _distinct_news_records(items, sec_filings)
+    compounds: list[float] = []
+    counts = {"positive": 0, "negative": 0, "neutral": 0}
+    for item in headlines:
+        score = _extract_compound_score(item)
+        if score is None:
+            continue
+        compounds.append(score)
+        label, _ = _headline_sentiment(score)
+        counts[label] += 1
+
+    mean_compound: float | None = None
+    sentiment_label = "unavailable"
+    if compounds:
+        mean_compound = fmean(compounds)
+        if mean_compound >= 0.08:
+            sentiment_label = "bullish"
+        elif mean_compound <= -0.08:
+            sentiment_label = "bearish"
+        else:
+            sentiment_label = "neutral"
+
+    latest_instant = None
+    latest_published_at = None
+    for entry in (*items, *sec_filings):
+        instant = _publication_instant(entry)
+        if instant is not None and (latest_instant is None or instant > latest_instant):
+            latest_instant = instant
+            latest_published_at = str(entry["published_at"]).strip()
+    has_any = bool(items or sec_filings)
+
+    return {
+        "status": "available" if has_any else "unavailable",
+        "sentiment_label": sentiment_label,
+        "mean_compound": round(mean_compound, 4) if mean_compound is not None else None,
+        "headline_count": len(headlines),
+        "sec_filing_count": len(distinct_filings),
+        "bullish_count": counts["positive"],
+        "bearish_count": counts["negative"],
+        "neutral_count": counts["neutral"],
+        "latest_published_at": latest_published_at,
+        "provider": str(cached.get("provider") or "none"),
+        "used_in_point_model": False,
+    }
 
 
 def clear_news_cache() -> None:

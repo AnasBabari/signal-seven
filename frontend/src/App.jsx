@@ -214,26 +214,20 @@ export function resolveSecFormLabel(item) {
   return 'SEC Filing';
 }
 
+function compoundScore(item) {
+  const raw = typeof item.sentiment === 'object' ? item.sentiment?.compound : item.sentiment;
+  const score = typeof raw === 'string' && /^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(raw.trim())
+    ? Number(raw)
+    : raw;
+  return Number.isFinite(score) && score >= -1 && score <= 1 ? score : null;
+}
+
 function resolveSentimentBadge(item) {
-  const label = String(item.sentiment_label || '').toLowerCase();
-  const badge = item.sentiment_badge;
-  const score = item.sentiment;
-  if (badge === 'Bullish' || label === 'positive' || label === 'bullish' || score > 0.15) {
-    return {
-      type: 'bullish',
-      label: 'Positive tone',
-    };
-  }
-  if (badge === 'Bearish' || label === 'negative' || label === 'bearish' || score < -0.15) {
-    return {
-      type: 'bearish',
-      label: 'Negative tone',
-    };
-  }
-  return {
-    type: 'neutral',
-    label: 'Neutral tone',
-  };
+  const score = compoundScore(item);
+  if (score === null) return null;
+  if (score > 0.15) return { type: 'bullish', label: 'Positive tone' };
+  if (score < -0.15) return { type: 'bearish', label: 'Negative tone' };
+  return { type: 'neutral', label: 'Neutral tone' };
 }
 
 function formatProviderLabel(provider) {
@@ -249,25 +243,153 @@ function formatProviderLabel(provider) {
 function mergeNewsAndFilings(news) {
   const baseItems = Array.isArray(news?.items) ? news.items : [];
   const extraFilings = Array.isArray(news?.sec_filings)
-    ? news.sec_filings.map((filing) => ({ ...filing, kind: filing.kind || 'sec_filing' }))
+    ? news.sec_filings
+      .filter((filing) => filing && typeof filing === 'object')
+      .map((filing) => ({ ...filing, kind: 'sec_filing' }))
     : [];
-  if (!extraFilings.length) return baseItems;
-  const seen = new Set();
+  const sorted = [...baseItems, ...extraFilings]
+    .filter((item) => item && typeof item === 'object')
+    .map((item) => {
+      const dates = [item.published_at, item.filing_date].map((value) => typeof value === 'string' ? value.trim() : '');
+      const publishedAt = dates.find((date) => Number.isFinite(Date.parse(date))) || '';
+      return {
+        item: { ...item, published_at: publishedAt },
+        timestamp: publishedAt ? Date.parse(publishedAt) : -Infinity,
+      };
+    })
+    .sort((a, b) => b.timestamp - a.timestamp);
+
   const combined = [];
-  for (const entry of [...baseItems, ...extraFilings]) {
-    if (!entry) continue;
-    const key = entry.id || entry.url || `${entry.title || entry.headline || ''}-${entry.published_at || entry.filing_date || ''}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    combined.push(entry);
+  const indexByKey = new Map();
+  for (const { item, timestamp } of sorted) {
+    const id = String(item.id ?? '').trim();
+    const url = typeof item.url === 'string' ? item.url.trim() : '';
+    const title = item.title || item.headline;
+    const keys = [];
+    if (id) keys.push(`id:${id}`);
+    if (url && !url.startsWith('https://www.sec.gov/edgar/browse/')) keys.push(`url:${url}`);
+    if (!keys.length && title) keys.push(`title:${title}:${timestamp}`);
+
+    const duplicateIndex = keys.map((key) => indexByKey.get(key)).find((index) => index !== undefined);
+    const index = duplicateIndex ?? combined.length;
+    for (const key of keys) indexByKey.set(key, index);
+    if (duplicateIndex === undefined) {
+      combined.push(item);
+    } else if (isSecFilingItem(item) && !isSecFilingItem(combined[index])) {
+      // The dedicated filings feed can identify an otherwise unmarked copy in items.
+      combined[index] = { ...item, ...combined[index], kind: 'sec_filing' };
+    }
   }
   return combined;
 }
 
-function NewsPanel({ news, ticker, loading }) {
+function summarizeNewsSentiment(items) {
+  let count = 0;
+  let sum = 0;
+  let correction = 0;
+  for (const item of items) {
+    if (isSecFilingItem(item)) continue;
+    const score = compoundScore(item);
+    if (score === null) continue;
+
+    // Compensate for floating-point cancellation at the backend's mean thresholds.
+    const nextSum = sum + score;
+    correction += Math.abs(sum) >= Math.abs(score)
+      ? (sum - nextSum) + score
+      : (score - nextSum) + sum;
+    sum = nextSum;
+    count += 1;
+  }
+
+  if (!count) return null;
+  const mean = (sum + correction) / count;
+  if (mean >= 0.08) return { type: 'bullish', label: 'Positive sentiment' };
+  if (mean <= -0.08) return { type: 'bearish', label: 'Negative sentiment' };
+  return { type: 'neutral', label: 'Neutral sentiment' };
+}
+
+function NewsList({ items, preview = false }) {
+  return (
+    <ul className={preview ? 'news-simple-list overview-news-list' : 'news-simple-list'}>
+      {items.map((item, index) => {
+        const isFiling = isSecFilingItem(item);
+        const sentiment = isFiling ? null : resolveSentimentBadge(item);
+        const title = item.title || item.headline || 'Market Update';
+        const publishedAt = item.published_at;
+        const timestamp = formatNewsTimestamp(publishedAt);
+        const sourceLabel = item.source || (isFiling ? 'SEC EDGAR' : 'Market Wire');
+        return (
+          <li
+            key={`${publishedAt}-${item.id || index}`}
+            className={`news-list-item ${isFiling ? 'sec-filing-item' : ''}`}
+          >
+            <div className="news-item-meta">
+              <span className="news-source">{sourceLabel}</span>
+              {timestamp && <time className="news-time" dateTime={publishedAt}>{timestamp}</time>}
+              {isFiling && <span className="sec-filing-badge">{resolveSecFormLabel(item)}</span>}
+              {sentiment && <span className={`sentiment-badge ${sentiment.type}`}>{sentiment.label}</span>}
+            </div>
+            <h3 className="news-item-headline">
+              {item.url ? (
+                <a href={item.url} target="_blank" rel="noreferrer noopener">
+                  {title} <span className="external-arrow" aria-hidden="true">↗</span>
+                </a>
+              ) : (
+                title
+              )}
+            </h3>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+function OverviewNewsPreview({ items, ticker, loading, onViewAll }) {
+  const previewItems = items.slice(0, 3);
+  const sentiment = summarizeNewsSentiment(items);
+
+  if (!loading && previewItems.length === 0) return null;
+
+  return (
+    <section className="panel overview-news-preview" aria-label={`${ticker} latest financial news`}>
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">Market context</p>
+          <h2>Latest news &amp; filings</h2>
+        </div>
+        <div className="heading-badges">
+          <span className="context-label">Not included in the forecast</span>
+          {sentiment && (
+            <span className={`sentiment-badge ${sentiment.type}`}>
+              {sentiment.label}
+            </span>
+          )}
+          <button
+            type="button"
+            className="overview-news-all-btn"
+            onClick={onViewAll}
+          >
+            View all news →
+          </button>
+        </div>
+      </div>
+
+      {loading && previewItems.length === 0 ? (
+        <div className="news-loading-state" role="status" aria-label="Loading latest headlines">
+          <div className="news-skeleton-pulse" />
+          <span>Loading latest stories…</span>
+        </div>
+      ) : (
+        <NewsList items={previewItems} preview />
+      )}
+    </section>
+  );
+}
+
+function NewsPanel({ items, provider, ticker, loading }) {
   const [showAll, setShowAll] = useState(false);
   const [filterKind, setFilterKind] = useState('all'); // 'all' | 'headlines' | 'filings'
-  const items = useMemo(() => mergeNewsAndFilings(news), [news]);
   const secCount = useMemo(() => items.filter(isSecFilingItem).length, [items]);
   const headlineCount = items.length - secCount;
   const effectiveFilter = secCount > 0 && headlineCount > 0 ? filterKind : 'all';
@@ -276,7 +398,7 @@ function NewsPanel({ news, ticker, loading }) {
     if (effectiveFilter === 'headlines') return items.filter((item) => !isSecFilingItem(item));
     return items;
   }, [items, effectiveFilter]);
-  const providerLabel = formatProviderLabel(news?.provider);
+  const providerLabel = formatProviderLabel(provider);
   const displayedItems = showAll ? filteredItems : filteredItems.slice(0, 5);
 
   return (
@@ -340,46 +462,7 @@ function NewsPanel({ news, ticker, loading }) {
         </div>
       ) : filteredItems.length ? (
         <>
-          <ul className="news-simple-list">
-            {displayedItems.map((item, index) => {
-              const isFiling = isSecFilingItem(item);
-              const filingLabel = isFiling ? resolveSecFormLabel(item) : null;
-              const sentiment = resolveSentimentBadge(item);
-              const title = item.title || item.headline || 'Market Update';
-              const rawDate = item.published_at || item.filing_date || '';
-              const timestamp = formatNewsTimestamp(rawDate);
-              const sourceLabel = item.source || (isFiling ? 'SEC EDGAR' : 'Market Wire');
-              return (
-                <li
-                  key={`${rawDate}-${item.id || index}`}
-                  className={`news-list-item ${isFiling ? 'sec-filing-item' : ''}`}
-                >
-                  <div className="news-item-meta">
-                    <span className="news-source">{sourceLabel}</span>
-                    {timestamp && <time className="news-time" dateTime={rawDate}>{timestamp}</time>}
-                    {isFiling ? (
-                      <span className="sec-filing-badge">
-                        {filingLabel}
-                      </span>
-                    ) : (
-                      <span className={`sentiment-badge ${sentiment.type}`}>
-                        {sentiment.label}
-                      </span>
-                    )}
-                  </div>
-                  <h3 className="news-item-headline">
-                    {item.url ? (
-                      <a href={item.url} target="_blank" rel="noreferrer noopener">
-                        {title} <span className="external-arrow" aria-hidden="true">↗</span>
-                      </a>
-                    ) : (
-                      title
-                    )}
-                  </h3>
-                </li>
-              );
-            })}
-          </ul>
+          <NewsList items={displayedItems} />
 
           {filteredItems.length > 5 && (
             <button
@@ -734,6 +817,11 @@ export default function App() {
     }
   }, []);
 
+  const selectAndFocusTab = (nextTab) => {
+    selectTab(nextTab);
+    document.getElementById(`tab-${nextTab}`)?.focus();
+  };
+
   const handleRangeChange = useCallback((nextRange) => {
     setSelectedRange(nextRange);
     selectedRangeRef.current = nextRange;
@@ -798,32 +886,29 @@ export default function App() {
     )
     : null;
 
-  const totalNewsCount = useMemo(() => mergeNewsAndFilings(news).length, [news]);
+  const newsItems = useMemo(() => mergeNewsAndFilings(news), [news]);
+  const totalNewsCount = newsItems.length;
 
   return (
-    <div className="app-shell">
-      <div className="ambient-orbs" aria-hidden="true">
-        <div className="orb orb-1" />
-        <div className="orb orb-2" />
-      </div>
-
-      <header className="topbar">
-        <a className="brand" href="#top" aria-label="Signal Seven home">
-          <span className="brand-icon">S7</span>
-          <div className="brand-title-wrap">
-            <b>Signal Seven</b>
-            <small>Stock forecasts made simple</small>
-          </div>
-        </a>
-
-        <div className="topbar-right">
-          <ServiceBadge status={serviceStatus} attempt={wakeAttempt} onRetry={wake} />
+    <div id="top" className="app-shell">
+      <div
+        className={`topbar ${submittedTicker ? 'topbar-has-search' : 'topbar-landing'}`}
+        role={submittedTicker ? 'banner' : undefined}
+      >
+        <div className="topbar-brand" role={submittedTicker ? undefined : 'banner'}>
+          <a className="brand" href="#top" aria-label="Signal Seven home">
+            <span className="brand-icon">S7</span>
+            <div className="brand-title-wrap">
+              <b>Signal Seven</b>
+              <small>Stock forecasts made simple</small>
+            </div>
+          </a>
         </div>
-      </header>
 
-      <main id="top">
-        {/* Search Header: Large heading on empty first visit; compact row beneath brand after submission */}
-        <section className={`search-section ${submittedTicker ? 'compact-search-section' : 'opening-search-section'}`}>
+        <div
+          className={`topbar-search-slot ${submittedTicker ? 'compact-search-section' : 'opening-search-section'}`}
+          role={submittedTicker ? 'search' : 'main'}
+        >
           {!submittedTicker && (
             <h1 className="explore-heading">Which stock would you like to explore?</h1>
           )}
@@ -839,11 +924,6 @@ export default function App() {
                   invalid={Boolean(inputError)}
                   errorId={inputError ? 'symbolError' : undefined}
                 />
-                {inputError && (
-                  <span id="symbolError" className="symbol-feedback" role="alert">
-                    {inputError}
-                  </span>
-                )}
               </div>
 
               <button
@@ -854,34 +934,49 @@ export default function App() {
                 View outlook
               </button>
             </div>
-          </form>
-
-          {loading && (
-            <div className="search-progress" role="status" aria-live="polite">
-              <span className="progress-dot" aria-hidden="true" />
-              <span>
-                {serviceStatus !== 'online'
-                  ? `Starting forecast service${wakeAttempt > 1 ? ` · attempt ${wakeAttempt}` : ''}… Preparing data for ${submittedTicker}…`
-                  : historyLoading
-                    ? `Loading data for ${submittedTicker}…`
-                    : `Loading forecast for ${submittedTicker}…`}
+            {inputError && (
+              <span id="symbolError" className="symbol-feedback" role="alert">
+                {inputError}
               </span>
-            </div>
-          )}
+            )}
+          </form>
+        </div>
 
-          {unifiedError && (
-            <div className="actionable-forecast-error" role="alert">
-              <span>{unifiedError.message}</span>
-              <button
-                type="button"
-                className="retry-action-btn"
-                onClick={handleRetry}
-              >
-                {unifiedError.actionLabel}
-              </button>
-            </div>
-          )}
-        </section>
+        <div className="topbar-right">
+          <ServiceBadge status={serviceStatus} attempt={wakeAttempt} onRetry={wake} />
+        </div>
+      </div>
+
+      <main hidden={!submittedTicker}>
+        {(loading || unifiedError) && (
+          <section className="status-banner-section">
+            {loading && (
+              <div className="search-progress" role="status" aria-live="polite">
+                <span className="progress-dot" aria-hidden="true" />
+                <span>
+                  {serviceStatus !== 'online'
+                    ? `Starting forecast service${wakeAttempt > 1 ? ` · attempt ${wakeAttempt}` : ''}… Preparing data for ${submittedTicker}…`
+                    : historyLoading
+                      ? `Loading data for ${submittedTicker}…`
+                      : `Loading forecast for ${submittedTicker}…`}
+                </span>
+              </div>
+            )}
+
+            {unifiedError && (
+              <div className="actionable-forecast-error" role="alert">
+                <span>{unifiedError.message}</span>
+                <button
+                  type="button"
+                  className="retry-action-btn"
+                  onClick={handleRetry}
+                >
+                  {unifiedError.actionLabel}
+                </button>
+              </div>
+            )}
+          </section>
+        )}
 
         {/* Results Workspace */}
         {chartTicker && (
@@ -917,8 +1012,7 @@ export default function App() {
                   const index = tabs.indexOf(activeTab);
                   const next = event.key === 'Home' ? 0 : event.key === 'End' ? 2
                     : (index + (event.key === 'ArrowRight' ? 1 : 2)) % 3;
-                  selectTab(tabs[next]);
-                  document.getElementById(`tab-${tabs[next]}`)?.focus();
+                  selectAndFocusTab(tabs[next]);
                 }}
               >
                 <button
@@ -972,12 +1066,21 @@ export default function App() {
                   currencySymbol={resolvedCurrencySymbol}
                   currentPrice={forecast?.ticker === chartTicker ? forecast?.current_price : null}
                 />
+                {activeTab === 'overview' && (
+                  <OverviewNewsPreview
+                    items={newsItems}
+                    ticker={chartTicker}
+                    loading={newsLoading}
+                    onViewAll={() => selectAndFocusTab('news')}
+                  />
+                )}
               </div>
 
               <div id="panel-news" role="tabpanel" aria-labelledby="tab-news" hidden={activeTab !== 'news'}>
                 <NewsPanel
                   key={chartTicker}
-                  news={news}
+                  items={newsItems}
+                  provider={news?.provider}
                   ticker={chartTicker}
                   loading={newsLoading}
                 />
