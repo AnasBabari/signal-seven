@@ -235,6 +235,39 @@ def test_missing_primary_document_links_to_each_accession(monkeypatch) -> None:
     }
 
 
+@pytest.mark.parametrize("with_wire_copy", [False, True])
+def test_edgar_accessions_are_distinct_before_the_five_filing_cap(monkeypatch, with_wire_copy):
+    sequence = [1, 1, 2, 3, 4, 5, 6]
+    recent = {
+        "form": ["8-K"] * len(sequence),
+        "accessionNumber": [f"0000789019-26-{n:06d}" for n in sequence],
+        "filingDate": [f"2026-11-{20 - n:02d}" for n in sequence],
+    }
+    wire = {
+        "id": "yahoo-primary-doc",
+        "url": "https://www.sec.gov/Archives/edgar/data/0000789019/000078901926000001/msft-8k.htm",
+        "sentiment": 0.9,
+    }
+    monkeypatch.setattr(
+        market_news, "_fetch_from_yahoo", lambda _: [wire] if with_wire_copy else []
+    )
+    monkeypatch.setattr(market_news, "get_exchange_market_close", lambda _: None)
+    transport = httpx.MockTransport(
+        lambda _: httpx.Response(200, json={"filings": {"recent": recent}})
+    )
+    with httpx.Client(transport=transport) as client:
+        monkeypatch.setattr(market_news, "_get_http_client", lambda: client)
+        feed = market_news.fetch_recent_news("MSFT", include_sec_filings=True)
+    assert [it["id"] for it in feed["sec_filings"]] == [
+        f"sec-0000789019-26-{n:06d}" for n in range(1, 6)
+    ]
+    assert feed["items"] == ([] if with_wire_copy else feed["sec_filings"])
+    digest = market_news.summarize_cached_news_context("MSFT")
+    assert digest["headline_count"] == 0
+    assert digest["sec_filing_count"] == 5
+    assert digest["sentiment_label"] == "unavailable"
+
+
 @pytest.mark.parametrize("with_score", [False, True])
 def test_invalid_scores_are_excluded_from_sentiment_only(with_score: bool) -> None:
     items = [

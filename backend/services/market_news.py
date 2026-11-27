@@ -16,6 +16,7 @@ import hashlib
 import inspect
 import json
 import logging
+import re
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -36,6 +37,12 @@ _negative_cache: TTLCache = TTLCache(maxsize=256, ttl=60)
 _cik_cache: TTLCache = TTLCache(maxsize=256, ttl=3600)
 _cik_negative_cache: TTLCache = TTLCache(maxsize=256, ttl=60)
 _lock = threading.RLock()
+
+# An EDGAR accession directory can contain a filing index, a primary document and exhibits.
+_SEC_ARCHIVE_ACCESSION = re.compile(
+    r"https?://(?:www\.)?sec\.gov/Archives/edgar/data/(\d+)/(\d{18}|\d{10}-\d{2}-\d{6})(?:/|[?#]|$)",
+    re.IGNORECASE,
+)
 
 _http_client: httpx.Client | None = None
 _http_client_lock = threading.Lock()
@@ -507,7 +514,7 @@ def _format_sec_filings(
     symbol: str, cik: str, raw_records: list[dict[str, str]]
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
-    for rec in raw_records[:5]:
+    for rec in raw_records:
         form = rec["form"]
         acc_time = rec["published_at"]
         acc_num = rec["accession_number"]
@@ -635,8 +642,6 @@ def _fetch_from_sec_edgar(symbol: str, *, timeout_seconds: float = 4.0) -> list[
                 "url": filing_url,
             }
         )
-        if len(raw_records) >= 5:
-            break
 
     with _lock:
         _cik_cache[cik] = raw_records
@@ -783,10 +788,9 @@ def fetch_recent_news(
     # 3. Try SEC EDGAR fallback
     if not items and _remaining() > 0.02:
         try:
-            items = _call_sec_edgar(symbol, _remaining())
-            if items:
+            sec_filings = _call_sec_edgar(symbol, _remaining())
+            if sec_filings:
                 provider_used = "sec_edgar"
-                sec_filings = [dict(it) for it in items[:5]]
         except Exception as exc:
             logger.info(
                 "SEC EDGAR news fetch failed for %s (%s); falling back to cached archive",
@@ -795,7 +799,7 @@ def fetch_recent_news(
             )
 
     # 4. Try Cached JSONL news archive fallback
-    if not items:
+    if not items and not sec_filings:
         try:
             items = _fetch_from_cache(symbol)
             if items:
@@ -807,7 +811,7 @@ def fetch_recent_news(
     if not sec_filings and not symbol.endswith(".L"):
         if include_sec_filings and _remaining() > 0.05:
             try:
-                sec_filings = _call_sec_edgar(symbol, _remaining())[:5]
+                sec_filings = _call_sec_edgar(symbol, _remaining())
             except Exception as exc:
                 logger.info("SEC EDGAR filing enrichment skipped for %s (%s)", symbol, exc)
         else:
@@ -816,13 +820,14 @@ def fetch_recent_news(
                 with _lock:
                     cached_sec = _cik_cache.get(cik)
                 if cached_sec:
-                    sec_filings = _format_sec_filings(symbol, cik, cached_sec)[:5]
+                    sec_filings = _format_sec_filings(symbol, cik, cached_sec)
 
     headlines, sec_filings = _distinct_news_records(items, sec_filings)
-    items = sec_filings if provider_used == "sec_edgar" else headlines
+    top_filings = sec_filings[:5]
+    top_items = top_filings if provider_used == "sec_edgar" else headlines[:10]
 
     market_close_utc = get_exchange_market_close(symbol)
-    for it in (*items, *sec_filings):
+    for it in (*top_items, *top_filings):
         pub_dt = _publication_instant(it)
         if pub_dt is None:
             it["after_market_close"] = False
@@ -832,8 +837,6 @@ def fetch_recent_news(
             it["after_market_close"] = is_after
             it["session_timing"] = "after_hours" if is_after else "regular_hours"
 
-    top_items = items[:10]
-    top_filings = sec_filings[:5]
     has_content = bool(top_items or top_filings)
     result = {
         "status": "available" if has_content else "unavailable",
@@ -865,6 +868,10 @@ def _news_item_keys(item: dict[str, Any]) -> set[tuple[str, ...]]:
     url = str(item.get("url") or "").strip()
     if url and not url.startswith("https://www.sec.gov/edgar/browse/"):
         keys.add(("url", url))
+        archive = _SEC_ARCHIVE_ACCESSION.match(url)
+        if archive:
+            cik, accession = archive.groups()
+            keys.add(("edgar", cik.lstrip("0") or "0", accession.replace("-", "")))
     if not keys:
         title = str(item.get("title") or item.get("headline") or item.get("form") or "")
         if title:
