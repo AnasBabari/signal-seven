@@ -1,203 +1,82 @@
 # Signal Seven
 
-[Try the app](https://stock-predictor-lstm-two.vercel.app) · [Local development](#local-development) · [Research records](#research-and-next-steps)
+Explore a stock’s price history, a seven-trading-session price estimate and its volatility outlook. Search 286 NASDAQ, NYSE and London listings (195 US and 91 UK). Available history and forecasts vary by ticker.
 
-Signal Seven brings historical stock prices, learned forecasts, volatility estimates, and recent
-financial news into one interface. Search for a supported US or UK stock, explore its history,
-and view an estimate for the next seven trading sessions.
+**[Try the app](https://stock-predictor-lstm-two.vercel.app)** · [Run locally](#run-locally) · [API examples](#api-examples) · [Research and evidence](#research-and-evidence)
 
-A separate volatility outlook estimates **how much prices could fluctuate—not whether they
-will rise or fall**.
+![MSFT Overview with historical closes, a seven-session midpoint, volatility outlook and news preview](docs/verification/ui-success-desktop.png)
 
-The frontend is a React app hosted on Vercel; the backend is a FastAPI service on Render.
-Opening the app wakes the backend automatically. There is no second link to open.
+*MSFT example using deterministic fixture data.* The silver continuation plots the midpoint between each session’s lower and upper price bounds. Open **Table** for the exact values. Historical accuracy scores evaluate a separate series, the model’s point forecasts.
 
-![Signal Seven interface showing a price estimate and separate volatility outlook](docs/verification/ui-success-desktop.png)
+## Explore a stock
 
-Interface example from browser verification, using controlled test data. This image is not a live forecast or evidence of model performance.
+1. Enter **MSFT** and select a suggestion or choose **View outlook**. The landing page checks backend health. Selecting a ticker, or opening a [ticker deep link](https://stock-predictor-lstm-two.vercel.app/?ticker=MSFT&range=1M&tab=overview), loads its data. On a cold start, history can appear while the first forecast is still running.
+2. Change the chart range, scrub a date for its price or estimate, or open **Expand**. In **Overview**, check the sector, market cap, 52-week range and available P/E. The 5-, 10- and 20-session volatility cards estimate the size of price fluctuations. Each horizon can succeed independently.
+3. Open **News** to filter headlines and SEC filings. Only scored headlines contribute to the sentiment summary. Filing copies are grouped by accession. The price API can return a cached news summary alongside its forecast; the model uses price and volume history.
+4. Open **Performance** for the available historical diagnostics and recorded volatility forecasts. Ledger entries identify which policy produced them. The frozen V1 ledger uses GARCH at one session and a rolling mean at longer horizons.
 
-## What you can do
+## What the forecasts measure
 
-- Search supported NASDAQ, NYSE, and London-listed stocks, with exchange-aware currencies.
-- Explore prices with zoom, pan, a crosshair, and time ranges based on available history.
-- View a seven-session experimental range midpoint, visually separated from actual prices.
-- Inspect a 5-, 10-, or 20-session volatility outlook and its model/fallback disclosure.
-- Read recent financial headlines as separate market context.
-- Inspect historical evaluation results and the source/date of the underlying data.
+**Price.** The production `auto` configuration fits Ridge on completed daily sessions. Random Forest is an explicit alternative. The experimental LSTM requires a separate checkpoint and PyTorch. In a historical walk-forward evaluation on 30 tickers, Ridge’s mean absolute price error was 1.0171 times that of carrying forward the latest close. The chart midpoint has no separate accuracy score. [Price benchmark](reports/VALIDATION_M5_2026-11-23.md)
 
-The research universe has expanded from the original five-stock benchmark to **286 stocks:
-195 US and 91 UK**. Research coverage is not a promise that every ticker will always have
-usable live data or a successful forecast.
+**Price uncertainty.** Eligible Ridge responses display **80% pointwise conformal range**. Across 20,839 historical forecast origins on that 30-ticker panel, 79.15% of individual session outcomes fell inside their bounds. All seven outcomes stayed inside their respective bounds for 50.45% of forecasts. The UI displays **Historical error range (experimental)** when the returned bounds lack the validated calibration. These historical rates do not guarantee coverage for a new forecast. [Calibration report](reports/VALIDATION_P1_CONFORMAL_2026-11-25.md)
 
-## How it works
+**Volatility.** The default policy, `v5_duan_har`, serves GARCH(1,1) for the API’s one-session horizon and Duan-smeared HAR-RV for the three horizons shown in Overview. On the 30-ticker historical panel, HAR-RV reduced volatility forecast loss (QLIKE) relative to the 60-day rolling baseline by 9.0%, 12.5% and 19.3% at 5, 10 and 20 sessions respectively. Packaged G3 is available by explicit request and reports a rolling fallback if unavailable. G3 v2 remains a research model. [Volatility validation](reports/VALIDATION_P1_VOLATILITY_2026-11-25.md) · [Methodology](docs/methodology.md)
 
-### Seven-session price forecasts
+## Run locally
 
-1. The backend retrieves adjusted daily open, high, low, close, and volume data, using completed
-   market sessions for forecasting.
-2. It builds historical return, volatility, trend, range, and volume features.
-3. Data is split chronologically into 70% training, 15% validation, and 15% test partitions.
-   Seven-session targets crossing a partition boundary are purged.
-4. Ridge and Random Forest candidates compete on validation error. A verified pretrained LSTM
-   checkpoint is an explicit experimental option, not part of automatic model selection.
-5. For locally fitted models, the selected configuration is evaluated on the later test
-   partition. A production model is then fitted using all resolved historical targets.
-6. Predicted cumulative log returns are converted into seven future price estimates.
+### Docker Compose
 
-The chart displays the arithmetic midpoint of the historical error bounds, as requested.
-That midpoint is not the model's point forecast or an evaluated expected price. Historical
-performance measures describe the point forecasts; current-refit band coverage is unverified.
+From the repository root with Docker Compose v2.24 or later installed, run:
 
-The learned endpoint remains `/api/v1/forecast`. A no-change forecast is an evaluation baseline,
-not a hardcoded replacement for the learned price path.
-
-### Volatility forecasts
-
-The separate volatility endpoint includes **G3**, a GPU-trained XGBoost model that learns a
-correction to rolling volatility. Training happens offline; the backend serves exported ONNX
-models without request-time G3 training or a production GPU.
-
-The packaged G3 artifacts come from a 286-stock panel and a frozen historical
-validation panel. Their provenance is deliberately labelled `validation_panel`;
-the public response does not claim untouched test-set certification. Detailed
-results and limitations are preserved in the [research provenance record](artifacts/PROVENANCE_FINAL.md).
-
-If G3 cannot be loaded or used, the volatility endpoint explicitly reports a fallback to
-rolling volatility. This is separate from the learned price endpoint's behavior.
-
-### Reusing expensive work
-
-For US and UK stocks, chart history warms the same daily market-data cache used by the price forecast.
-Repeated requests can reuse a forecast for unchanged data rather than repeat training.
-Same-worker requests are coordinated to avoid duplicate training.
-
-With `FORECAST_MODEL_CACHE_DIR` configured, fitted model/preprocessor artifacts can survive a
-process restart and be loaded for inference. Changes to data, model configuration, implementation,
-runtime versions, or checkpoints invalidate reuse. Invalid artifacts fall through to training.
-
-**A local disk cache is not durable storage across Render instance replacement or redeploys.**
-US data uses the configured provider chain; London-listed stocks use an explicit Yahoo adapter
-through the same completed-session service and cache interface. See the
-[artifact cache design and security notes](docs/FORECAST_ARTIFACT_CACHE.md).
-
-## Limitations
-
-- This is an experiment, not financial advice or a guarantee of profitable trading.
-- Price forecasts and volatility forecasts answer different questions. A volatility scenario
-  range does not establish a directional price forecast.
-- Price uncertainty bands come from validation residuals; they are not guaranteed confidence
-  intervals. Gaussian volatility scenarios also depend on modelling assumptions.
-- Historical evaluation is not a live track record. A pretrained checkpoint's training history
-  must be audited before treating its displayed historical metrics as out-of-sample evidence.
-- Recent news is context only in the public price forecast. A positive MSFT news pilot did not
-  generalize convincingly across the fixed 25-stock replication; the
-  [negative result is preserved](artifacts/news_replication25_v1/STUDY_SUMMARY.md).
-- G3's validation-panel results do not demonstrate that the price predictor beats its
-  baseline, or that either model will retain its performance in future markets.
-- Surviving-stock selection, provider coverage, and historical news revisions limit the research.
-  Results do not automatically transfer to penny stocks, illiquid securities, or unseen markets.
-
-## One-link startup
-
-The app calls `/health` when the page opens and requests chart history for the selected stock.
-A sleeping Render service starts in the background while the interface displays its loading
-state. Daily history also warms the forecast data cache.
-
-Cold starts and the first model fit can still take time. Repeated requests can reuse cached work;
-the interface keeps unavailable data and degraded results explicit. Intraday history is best-effort.
-
-## API
-
-```http
-GET /health
-GET /api/v1/history?ticker=MSFT
-GET /api/v1/forecast?ticker=MSFT&days=7
-GET /api/v1/volatility/forecast?ticker=MSFT&horizon=5&model=gpu_g3
-GET /api/v1/news?ticker=MSFT
+```sh
+docker compose up --build
 ```
 
-Price responses include recent historical closes, seven future trading dates, predicted prices
-and uncertainty paths, model selection/evaluation details, and market-data provenance. Volatility
-responses identify the model used and any fallback. Forecast routes expose server-side timing
-information through `Server-Timing` headers.
+Open [the local app](http://localhost:5500). The API listens on [port 8000](http://localhost:8000/docs). Stop the services with Ctrl+C, then run `docker compose down`.
 
-## Local development
+### Native development
 
-Use Python 3.11 and Node.js 22.22.2 or later within the Node 22 series (CI and Docker build on
-Node 22; `frontend/package.json` supports `^22.22.2 || ^24.15.0 || >=26.0.0`). Run the backend and
-frontend in separate terminals.
+Use Python 3.11, uv and Node.js 22.22.2 or later in the 22.x series. Other supported Node versions are listed in the [frontend manifest](frontend/package.json). From the repository root, start the API in one terminal:
 
-### Backend
-
-From the repository root:
-
-```powershell
-uv sync --project backend --locked --no-install-project
-cd backend
-.venv/Scripts/python.exe -m uvicorn api:app --reload --port 8000
+```sh
+uv sync --project backend --python 3.11 --locked --no-install-project
+uv run --project backend --no-sync python -m uvicorn api:app --app-dir backend --reload --port 8000
 ```
 
-Local development defaults to Yahoo. Production can select Alpaca with server-only variables:
+From the same root in a second terminal:
 
-```text
-MARKET_DATA_PROVIDER=alpaca
-ALPACA_API_KEY_ID=<your-key>
-ALPACA_API_SECRET_KEY=<your-secret>
-```
-
-ONNX Runtime is included in backend requirements for G3 inference. PyTorch is a separate
-dependency for LSTM use and research tests. Never put provider credentials in a `VITE_*`
-variable or commit them to the repository.
-
-### Frontend
-
-From the repository root, in the second terminal:
-
-```powershell
+```sh
 cd frontend
 npm ci
-$env:VITE_API_URL = "http://127.0.0.1:8000"
 npm run dev
 ```
 
-Open `http://localhost:5500`. Setting the URL explicitly keeps local requests on your local
-backend; the development proxy also defaults to `http://127.0.0.1:8000`.
+Open [localhost:5500](http://localhost:5500). Vite proxies API requests to port 8000 by default. Local development uses Yahoo by default. To use Alpaca, configure `MARKET_DATA_PROVIDER`, `ALPACA_API_KEY_ID` and `ALPACA_API_SECRET_KEY` on the backend. For a separately hosted static frontend, set `VITE_API_URL` to the public backend URL before building.
 
-For production, set `VITE_API_URL` to the backend's public URL **before building** the frontend.
+## API examples
 
-## Verification
+Open these read-only requests against a running local backend. The volatility batch returns successful horizons in `forecasts` and individual failures in `errors`.
 
-From the repository root:
+| Request | What to inspect |
+| --- | --- |
+| [Health](http://localhost:8000/health) · [Readiness](http://localhost:8000/ready) · [Models](http://localhost:8000/models) | Service status, dependencies and configured model policies |
+| [London daily history](http://localhost:8000/api/v1/history?ticker=SHEL.L) | Dated closes and quote units |
+| [MSFT seven-session price estimate](http://localhost:8000/api/v1/forecast?ticker=MSFT&days=7) | Point predictions, bounds, calibration and cached news context. This route includes a `Server-Timing` header. |
+| [MSFT volatility batch](http://localhost:8000/api/v1/volatility/forecast/batch?ticker=MSFT&horizons=5,10,20&model=auto) | Annualized volatility, model used and fallback evidence for each horizon |
+| [MSFT news and filings](http://localhost:8000/api/v1/news?ticker=MSFT) | Headlines, filing links and publication times |
 
-```powershell
-backend/.venv/Scripts/python.exe -m pip install "torch==2.11.0" --index-url https://download.pytorch.org/whl/cpu
-backend/.venv/Scripts/python.exe -m pytest -c backend/pyproject.toml backend/tests research/tests -q -ra
-backend/.venv/Scripts/ruff.exe check .
-backend/.venv/Scripts/ruff.exe format --check .
+See the [API reference](docs/api.md) for additional routes, including company info, intraday history and the forward ledger.
 
-cd frontend
-npm run test:run
-npm run build
-```
+## Research and evidence
 
-Use a separate CUDA-enabled research environment for GPU training; the command above is for
-CPU test execution. Tests cover temporal purging, completed-session data, provider errors,
-history-to-forecast cache reuse, artifact equivalence, chart behavior, and G3 inference/fallbacks.
-The [CI workflow](.github/workflows/ci.yml) is the source of truth for runner dependencies.
+The 286-stock catalog describes product coverage. Each validation study has its own historical population and evaluation period. The forward ledger records forecasts that can be scored after their target dates. This project is experimental and does not provide investment advice.
 
-## Research and next steps
-
-- [OHLCV study summary](artifacts/STUDY_SUMMARY.md): preserved negative price-signal experiments.
-- [25-stock news replication](artifacts/news_replication25_v1/STUDY_SUMMARY.md): the MSFT pilot
-  did not establish a general news advantage.
-- [GPU volatility provenance](artifacts/PROVENANCE_FINAL.md): G3 evaluation and integration record.
-- [Artifact cache design](docs/FORECAST_ARTIFACT_CACHE.md): reuse guarantees and operational limits.
-
-Per-worker fitting capacity is bounded. Optional PostgreSQL advisory locks can coordinate
-fitting across workers when explicitly configured; responses expose stage-level timings.
-Shared durable artifact storage remains future work. New research must remain separate from
-scored studies; adding a feature is not evidence that it helps.
+- [Price-signal experiments](artifacts/STUDY_SUMMARY.md) and [25-stock news replication](artifacts/news_replication25_v1/STUDY_SUMMARY.md) document the negative results behind the choice to show news as context.
+- [G3 provenance](artifacts/PROVENANCE_FINAL.md) describes the packaged model’s historical validation panel.
+- [Forecast cache design](docs/FORECAST_ARTIFACT_CACHE.md) explains reuse across requests and the limits of local storage on Render.
+- The [contributor guide](AGENTS.md) and [CI workflow](.github/workflows/ci.yml) cover the full test setup, production bundle checks and browser contracts. [Screenshot reproduction](docs/verification/README.md) uses fixture data.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+[MIT](LICENSE)

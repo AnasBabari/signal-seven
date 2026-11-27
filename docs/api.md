@@ -42,8 +42,9 @@ breaker state, consecutive failures, last error) so you can tell
 
 ### `GET /models`
 
-Catalogue of currently available models and their status. Useful for
-diagnosing whether the G3 volatility release loaded or fell back.
+Reports the configured price candidates, volatility horizons and per-horizon auto policy,
+training capacity and ledger configuration. A specific forecast's `evidence.fallback_used`
+describes any fallback on that request.
 
 ### `GET /`
 
@@ -73,6 +74,11 @@ Response:
 | `daily` | array of `{d, c}` | date + close, capped at the most recent **1500** sessions |
 | `intraday` | array \| null | 24H bars; `null` until a live intraday source is configured |
 | `intraday_session` | string \| null | |
+
+### `GET /api/v1/intraday`
+
+The 24H chart requests this route on demand for supported US equities. Inspect
+`available` and `bars` before plotting. Daily history remains usable when intraday bars are unavailable.
 
 ### `GET /api/v1/search`
 
@@ -126,13 +132,13 @@ Response:
 | `current_price` | float | |
 | `future_dates` | string[7] | next 7 **trading** days (exchange calendar aware) |
 | `predicted_prices` | float[7] | central estimate |
-| `lower_prices`, `upper_prices` | float[7] | residual-quantile band |
+| `lower_prices`, `upper_prices` | float[7] | per-session bounds when the requested model supplies intervals |
 | `historical_dates`, `historical_prices` | arrays | recent actuals for context |
-| `historical_error_band` | object | `{lower_prices, upper_prices}` |
+| `interval_calibration` | object | The UI labels the bounds “80% pointwise conformal range” when `method` is `volatility_scaled_online_split_conformal` and `m5_gate_verdict` is `PASS`. Other usable bounds receive the experimental label. |
 | `model` | object | `{name, kind, feature_version, target, selection, candidate_validation_mae}` |
 | `backtest` | object | see below |
 | `provenance` | object | `{data_provider, market_data_cache, calendar, completed_daily_bars_only}` |
-| `news` | object | headlines, explicitly **non-model** context |
+| `news_context` | object | cached headline sentiment, headline and SEC filing counts, availability and `used_in_point_model: false` |
 
 `backtest` is a chronological holdout, not a fit:
 
@@ -145,7 +151,7 @@ persistence_mae_percent, relative_mae_vs_persistence, per_horizon
 `relative_mae_vs_persistence` is the honest headline: below `1.0`
 means the model beat a naive "tomorrow = today" on that ticker.
 
-## Volatility (G3)
+## Volatility
 
 Volatility endpoints estimate **how much** a price may move, never
 which direction. See [methodology.md](methodology.md).
@@ -155,8 +161,8 @@ which direction. See [methodology.md](methodology.md).
 | parameter | type | default | notes |
 |---|---|---|---|
 | `ticker` | string | `AAPL` | |
-| `horizon` | int | `5` | must be one of **5, 10, 20** |
-| `model` | string | `auto` | `gpu_g3` selects the learned validation-panel model explicitly |
+| `horizon` | int | `5` | one of **1, 5, 10, 20** sessions |
+| `model` | string | `auto` | Default policy `v5_duan_har` selects `garch_11` at one session and `har_rv` at 5, 10 and 20. Request `gpu_g3` explicitly for the packaged ONNX model. |
 
 Response (abridged):
 
@@ -193,6 +199,12 @@ test performance. A serving failure is disclosed with `model_status: baseline`
 and a non-null `fallback_used`; the UI renders missing risk information as
 `Unavailable`.
 
+### `GET /api/v1/volatility/forecast/batch`
+
+Example: `/api/v1/volatility/forecast/batch?ticker=MSFT&horizons=5,10,20&model=auto`.
+The batch shares a market snapshot across requested horizons. `forecasts` and `errors`
+are keyed by horizon, so callers can display successful results when one horizon fails.
+
 ### `GET /api/v1/volatility/ledger`
 
 Immutable forward ledger of past forecasts, so live performance can
@@ -212,14 +224,15 @@ surface:
 
 ### `GET /api/v1/news`
 
-Recent headlines for a ticker, delivered as **context only**. They
-are never an input to the price or volatility models.
+Returns `items` and `sec_filings`. The SEC-only fallback also exposes its filings in
+`items`. Duplicate filings are grouped by accession and excluded from headline sentiment.
+News provides context for readers. Fetching the price forecast only reads the cached news summary.
 
 ## Error responses
 
 | status | when |
 |---|---|
-| `400` | Bad parameter (e.g. `days != 7`, horizon not in 5/10/20) |
+| `400` | Unsupported parameter value, for example a 3-session volatility horizon |
 | `404` | Ticker not in the supported universe / no market data |
 | `422` | Market history too short or not finite enough to form a forecast |
 | `429` | Rate limit exceeded |
