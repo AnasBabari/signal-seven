@@ -62,10 +62,11 @@ def forecast(
         else:
             result = train_and_forecast(symbol, frame, model_name=model)
         train_ms = (time.perf_counter() - t_train) * 1000.0
+        news_context = summarize_cached_news_context(symbol)
         total_ms = (time.perf_counter() - route_started) * 1000.0
         result = {
             **result,
-            "news_context": summarize_cached_news_context(symbol),
+            "news_context": news_context,
             "timing": {**result.get("timing", {}), "data_ms": data_ms, "total_ms": total_ms},
         }
         response = JSONResponse(content=result)

@@ -20,6 +20,7 @@ import threading
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from statistics import fmean
 from typing import Any
 from urllib.parse import urlparse
 
@@ -296,6 +297,22 @@ def _safe_url(value: object) -> str | None:
     return candidate if parsed.scheme in ("https", "http") and parsed.netloc else None
 
 
+def _headline_sentiment(compound: float) -> tuple[str, str]:
+    if compound > 0.15:
+        return "positive", "Bullish"
+    if compound < -0.15:
+        return "negative", "Bearish"
+    return "neutral", "Neutral"
+
+
+def _publication_instant(item: dict[str, Any]) -> datetime | None:
+    try:
+        instant = datetime.fromisoformat(str(item.get("published_at") or "").strip())
+    except ValueError:
+        return None
+    return instant if instant.tzinfo is not None else instant.replace(tzinfo=UTC)
+
+
 def _format_news_item(
     *,
     identifier: str | None = None,
@@ -334,16 +351,7 @@ def _format_news_item(
     sentiment_target = f"{clean_title}. {clean_summary}" if clean_summary else clean_title
     scores = _sentiment.polarity_scores(sentiment_target)
     compound = float(scores["compound"])
-
-    if compound > 0.15:
-        label = "positive"
-        badge = "Bullish"
-    elif compound < -0.15:
-        label = "negative"
-        badge = "Bearish"
-    else:
-        label = "neutral"
-        badge = "Neutral"
+    label, badge = _headline_sentiment(compound)
 
     if not identifier:
         identifier = hashlib.sha256(f"{clean_title}\0{pub_iso}".encode()).hexdigest()[:16]
@@ -434,7 +442,9 @@ def _fetch_from_yahoo(symbol: str) -> list[dict[str, Any]]:
     for article in raw_news:
         if not isinstance(article, dict):
             continue
-        content = article.get("content") if isinstance(article.get("content"), dict) else {}
+        content = article.get("content")
+        if not isinstance(content, dict):
+            content = {}
         title = str(
             content.get("title") or article.get("headline") or article.get("title") or ""
         ).strip()
@@ -807,20 +817,19 @@ def fetch_recent_news(
                 if cached_sec:
                     sec_filings = _format_sec_filings(symbol, cik, cached_sec)[:5]
 
-    items.sort(key=lambda it: str(it.get("published_at") or ""), reverse=True)
+    oldest = datetime.min.replace(tzinfo=UTC)
+    items.sort(key=lambda it: _publication_instant(it) or oldest, reverse=True)
 
     market_close_utc = get_exchange_market_close(symbol)
     for it in (*items, *sec_filings):
-        pub_str = str(it.get("published_at") or "")
-        try:
-            pub_dt = datetime.fromisoformat(pub_str.replace("Z", "+00:00")).astimezone(UTC)
-            if market_close_utc is not None:
-                is_after = pub_dt > market_close_utc
-                it["after_market_close"] = is_after
-                it["session_timing"] = "after_hours" if is_after else "regular_hours"
-        except Exception:
+        pub_dt = _publication_instant(it)
+        if pub_dt is None:
             it["after_market_close"] = False
             it["session_timing"] = "regular_hours"
+        elif market_close_utc is not None:
+            is_after = pub_dt > market_close_utc
+            it["after_market_close"] = is_after
+            it["session_timing"] = "after_hours" if is_after else "regular_hours"
 
     top_items = items[:10]
     top_filings = sec_filings[:5]
@@ -847,6 +856,17 @@ def fetch_recent_news(
     return dict(result)
 
 
+def _news_item_key(item: dict[str, Any]) -> tuple[str, ...]:
+    if item.get("id"):
+        return ("id", str(item["id"]))
+    if item.get("url"):
+        return ("url", str(item["url"]))
+    title = str(item.get("title") or item.get("headline") or item.get("form") or "")
+    if title:
+        return ("title", title, str(item.get("published_at") or item.get("filing_date") or ""))
+    return ("record", str(id(item)))
+
+
 def _extract_compound_score(item: dict[str, Any]) -> float | None:
     raw = item.get("sentiment")
     if isinstance(raw, dict):
@@ -855,7 +875,7 @@ def _extract_compound_score(item: dict[str, Any]) -> float | None:
         return None
     try:
         val = float(raw)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return val if -1.0 <= val <= 1.0 else None
 
@@ -889,26 +909,28 @@ def summarize_cached_news_context(ticker: str) -> dict[str, Any]:
     items = [it for it in (cached.get("items") or []) if isinstance(it, dict)]
     sec_filings = [it for it in (cached.get("sec_filings") or []) if isinstance(it, dict)]
 
+    # The SEC fallback exposes each filing in both collections in the public news feed.
+    filing_keys = {_news_item_key(filing) for filing in sec_filings}
+    filing_keys.update(
+        _news_item_key(it)
+        for it in items
+        if it.get("kind") == "sec_filing" or it.get("provider") == "sec_edgar" or it.get("form")
+    )
+    headlines = [it for it in items if _news_item_key(it) not in filing_keys]
     compounds: list[float] = []
-    bullish_count = 0
-    bearish_count = 0
-    neutral_count = 0
-    for item in items:
+    counts = {"positive": 0, "negative": 0, "neutral": 0}
+    for item in headlines:
         score = _extract_compound_score(item)
         if score is None:
             continue
         compounds.append(score)
-        if score >= 0.08:
-            bullish_count += 1
-        elif score <= -0.08:
-            bearish_count += 1
-        else:
-            neutral_count += 1
+        label, _ = _headline_sentiment(score)
+        counts[label] += 1
 
     mean_compound: float | None = None
     sentiment_label = "unavailable"
     if compounds:
-        mean_compound = round(sum(compounds) / len(compounds), 4)
+        mean_compound = fmean(compounds)
         if mean_compound >= 0.08:
             sentiment_label = "bullish"
         elif mean_compound <= -0.08:
@@ -916,23 +938,24 @@ def summarize_cached_news_context(ticker: str) -> dict[str, Any]:
         else:
             sentiment_label = "neutral"
 
-    timestamps = [
-        str(entry.get("published_at") or "").strip()
-        for entry in (*items, *sec_filings)
-        if str(entry.get("published_at") or "").strip()
-    ]
-    latest_published_at = max(timestamps) if timestamps else None
+    latest_instant = None
+    latest_published_at = None
+    for entry in (*items, *sec_filings):
+        instant = _publication_instant(entry)
+        if instant is not None and (latest_instant is None or instant > latest_instant):
+            latest_instant = instant
+            latest_published_at = str(entry["published_at"]).strip()
     has_any = bool(items or sec_filings)
 
     return {
         "status": "available" if has_any else "unavailable",
         "sentiment_label": sentiment_label,
-        "mean_compound": mean_compound,
-        "headline_count": len(items),
-        "sec_filing_count": len(sec_filings),
-        "bullish_count": bullish_count,
-        "bearish_count": bearish_count,
-        "neutral_count": neutral_count,
+        "mean_compound": round(mean_compound, 4) if mean_compound is not None else None,
+        "headline_count": len(headlines),
+        "sec_filing_count": len(filing_keys),
+        "bullish_count": counts["positive"],
+        "bearish_count": counts["negative"],
+        "neutral_count": counts["neutral"],
         "latest_published_at": latest_published_at,
         "provider": str(cached.get("provider") or "none"),
         "used_in_point_model": False,
