@@ -16,3 +16,21 @@ updates:
     directory: "/frontend"
     schedule:
       interval: "weekly"
+    # Keep peer-locked frontend ecosystems aligned across major, minor, and patch
+    # updates so Dependabot does not open broken split PRs (e.g. vitest without
+    # @vitest/coverage-v8, or react without react-dom and @types/react-dom).
+    groups:
+      react:
+        patterns:
+          - "react"
+          - "react-dom"
+          - "@types/react"
+          - "@types/react-dom"
+      vite:
+        patterns:
+          - "vite"
+          - "@vitejs/*"
+      vitest:
+        patterns:
+          - "vitest"
+          - "@vitest/*"

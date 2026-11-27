@@ -123,8 +123,9 @@ information through `Server-Timing` headers.
 
 ## Local development
 
-Use Python 3.11 and Node.js 22.12 or later within the Node 22 series. Run the backend and frontend
-in separate terminals.
+Use Python 3.11 and Node.js 22.22.2 or later within the Node 22 series (CI and Docker build on
+Node 22; `frontend/package.json` supports `^22.22.2 || ^24.15.0 || >=26.0.0`). Run the backend and
+frontend in separate terminals.
 
 ### Backend
 
