@@ -6,7 +6,8 @@ const volatilityFutureDates = [...futureDates, '2026-09-16', '2026-09-17', '2026
 const historyDates = ['2026-08-25', '2026-08-26', '2026-08-27', '2026-08-28',
   '2026-08-31', '2026-09-01', '2026-09-02', origin];
 
-export function volatilityPayload(horizon) {
+export function volatilityPayload(horizon, model = 'gpu_g3') {
+  const learned = model === 'gpu_g3';
   const dates = volatilityFutureDates.slice(0, horizon);
   const historical = historyDates;
   const quantiles = Object.fromEntries([
@@ -21,25 +22,27 @@ export function volatilityPayload(horizon) {
       price_quantiles: quantiles,
       expected_annualized_volatility: 0.214,
       predicted_volatility: 0.214,
-      model: 'gpu_g3', requested_model: 'gpu_g3', baseline: false,
+      model, requested_model: learned ? model : 'auto', baseline: !learned,
     },
     evidence: {
-      model_status: 'learned_model', baseline: false, model_name: 'gpu_g3',
-      model_version: 'g3-qlike-base-margin-v2', metric_source: 'validation_panel',
+      model_status: learned ? 'learned_model' : 'baseline', baseline: !learned, model_name: model,
+      ...(learned
+        ? { model_version: 'g3-qlike-base-margin-v2', metric_source: 'validation_panel' }
+        : { model_family: 'statistical_baseline', default_policy: 'v5_duan_har' }),
       data_as_of: origin, data_provider: 'local_fixture', risk_level: 'Moderate',
       trailing_annualized_volatility_60d: 0.19, fallback_used: null,
     },
   };
 }
 
-export function volatilityBatchPayload(horizons = [5, 10, 20], failedHorizon = null, ticker = 'MSFT', currentPrice = 450) {
+export function volatilityBatchPayload(horizons = [5, 10, 20], failedHorizon = null, ticker = 'MSFT', currentPrice = 450, model = 'gpu_g3') {
   const forecasts = {};
   const errors = {};
   for (const horizon of horizons) {
     if (horizon === failedHorizon) {
       errors[String(horizon)] = { code: 'HORIZON_UNAVAILABLE', message: 'Fixture horizon unavailable' };
     } else {
-      const entry = volatilityPayload(horizon);
+      const entry = volatilityPayload(horizon, model);
       entry.ticker = ticker;
       entry.current_price = currentPrice;
       if (currentPrice !== 450) {
@@ -61,7 +64,7 @@ export function volatilityBatchPayload(horizons = [5, 10, 20], failedHorizon = n
   };
 }
 
-export function installFixtures(page, failedHorizon = null, priceOverrides = {}) {
+export function installFixtures(page, failedHorizon = null, priceOverrides = {}, volatilityModel = 'gpu_g3') {
   return page.route('**/*', async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname.endsWith('/health')) return route.fulfill({ json: { status: 'ok' } });
@@ -75,14 +78,14 @@ export function installFixtures(page, failedHorizon = null, priceOverrides = {})
     }
     if (url.pathname.endsWith('/volatility/forecast/batch')) {
       const horizons = (url.searchParams.get('horizons') || '5,10,20').split(',').map(Number);
-      return route.fulfill({ json: volatilityBatchPayload(horizons, failedHorizon) });
+      return route.fulfill({ json: volatilityBatchPayload(horizons, failedHorizon, 'MSFT', 450, volatilityModel) });
     }
     if (url.pathname.includes('/volatility/forecast')) {
       const horizon = Number(url.searchParams.get('horizon') || 5);
       if (horizon === failedHorizon) {
         return route.fulfill({ status: 503, json: { detail: 'Fixture horizon unavailable' } });
       }
-      return route.fulfill({ json: volatilityPayload(horizon) });
+      return route.fulfill({ json: volatilityPayload(horizon, volatilityModel) });
     }
     if (url.pathname.endsWith('/forecast')) {
       return route.fulfill({ json: {

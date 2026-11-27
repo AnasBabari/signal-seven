@@ -10,6 +10,7 @@ RUN pip install --no-cache-dir uv==0.11.16 && uv sync --locked --no-dev --no-ins
 
 COPY . .
 
+RUN install -d -o appuser -g appgroup /data
 USER appuser
 
 EXPOSE 8000
