@@ -587,7 +587,7 @@ main { padding-top: 18px; }
 }
 
 .t212-price.is-estimate {
-  color: var(--cyan);
+  color: #d1d5db;
 }
 
 .t212-change {
@@ -618,11 +618,11 @@ main { padding-top: 18px; }
 .t212-scrub-range {
   font-size: 12px;
   font-weight: 500;
-  color: var(--cyan);
+  color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
-  padding: 2px 8px;
+  padding: 2px 9px;
   border-radius: var(--radius-full);
-  background: var(--cyan-soft);
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .t212-price-skeleton {
@@ -635,12 +635,12 @@ main { padding-top: 18px; }
   animation: t212-shimmer 1.4s ease-in-out infinite;
 }
 
-/* Compact Inline Estimate Meta Strip (replaces bulky bordered box) */
+/* Compact Inline Estimate Meta Strip (calm matte charcoal accent) */
 .chart-estimate-bar {
   margin: 4px 0 12px;
   padding: 8px 12px;
-  background: rgba(56, 189, 248, 0.05);
-  border-left: 2px solid var(--cyan);
+  background: rgba(255, 255, 255, 0.03);
+  border-left: 2px solid #9ca3af;
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
 }
 
@@ -669,7 +669,7 @@ main { padding-top: 18px; }
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--cyan);
+  background: #9ca3af;
   flex-shrink: 0;
 }
 
@@ -783,7 +783,12 @@ main { padding-top: 18px; }
 }
 .toolbar-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-.estimate-toggle-btn.active,
+.estimate-toggle-btn.active {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.08);
+  border-color: var(--border-medium);
+}
+
 .table-toggle-btn.active {
   color: var(--cyan);
   background: var(--cyan-soft);
@@ -793,7 +798,7 @@ main { padding-top: 18px; }
 .estimate-indicator-dash {
   width: 11px;
   height: 0;
-  border-top: 2px dashed var(--cyan);
+  border-top: 2px solid #9ca3af;
 }
 .estimate-toggle-wrapper { display: flex; align-items: center; gap: 6px; }
 .intraday-estimate-note { font-size: 11px; color: var(--text-muted); }

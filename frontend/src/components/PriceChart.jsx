@@ -402,9 +402,7 @@ export default function PriceChart({
       tooltipTitle: '#f3f4f6',
       tooltipBody: '#cbd5e1',
       tooltipBorder: 'rgba(255, 255, 255, 0.10)',
-      estimate: '#7dd3fc',
-      bandBorder: 'rgba(125, 211, 252, 0.18)',
-      bandFill: 'rgba(125, 211, 252, 0.06)',
+      estimate: '#9ca3af',
     };
   }, [stats.up]);
 
@@ -440,6 +438,8 @@ export default function PriceChart({
     });
 
     let forecastSplitIndex = null;
+    let bandLower = null;
+    let bandUpper = null;
 
     if (canShowForecastOverlay && estimate?.series?.length > 0 && points.prices.length > 0) {
       estimate.futureDates.forEach((futureDate) => {
@@ -455,38 +455,11 @@ export default function PriceChart({
         && estimate.upperSeries.length === estimate.series.length;
 
       if (hasRangeBand) {
-        const activeRangeLabel = estimate.rangeLabel || 'Historical error range (experimental)';
-        datasets.push({
-          role: 'band-upper',
-          label: activeRangeLabel,
-          data: padAnchoredForecast(estimate.upperSeries, anchorClose, forecastSplitIndex),
-          borderColor: colors.bandBorder,
-          backgroundColor: colors.bandFill,
-          borderWidth: 1,
-          pointRadius: 0,
-          pointHoverRadius: 0,
-          pointHitRadius: 0,
-          tension: 0,
-          fill: '+1',
-          spanGaps: false,
-        });
-
-        datasets.push({
-          role: 'band-lower',
-          label: `${activeRangeLabel} — lower`,
-          data: padAnchoredForecast(estimate.lowerSeries, anchorClose, forecastSplitIndex),
-          borderColor: colors.bandBorder,
-          backgroundColor: 'transparent',
-          borderWidth: 1,
-          pointRadius: 0,
-          pointHoverRadius: 0,
-          pointHitRadius: 0,
-          tension: 0,
-          fill: false,
-          spanGaps: false,
-        });
+        bandLower = padAnchoredForecast(estimate.lowerSeries, anchorClose, forecastSplitIndex);
+        bandUpper = padAnchoredForecast(estimate.upperSeries, anchorClose, forecastSplitIndex);
       }
 
+      // Single clean solid neutral-silver continuation line (no shaded cone on canvas)
       datasets.push({
         role: 'midpoint',
         label: 'Range midpoint — experimental',
@@ -494,7 +467,7 @@ export default function PriceChart({
         borderColor: colors.estimate,
         backgroundColor: 'transparent',
         borderWidth: 1.9,
-        borderDash: [6, 4],
+        borderDash: [],
         pointRadius: 0,
         pointHoverRadius: 4.5,
         pointHoverBackgroundColor: colors.estimate,
@@ -509,6 +482,8 @@ export default function PriceChart({
     return {
       labels,
       forecastSplitIndex,
+      bandLower,
+      bandUpper,
       datasets,
     };
   }, [points, canShowForecastOverlay, estimate, colors]);
@@ -516,8 +491,6 @@ export default function PriceChart({
   const datasetByRole = useMemo(() => ({
     history: chartData.datasets.find((ds) => ds.role === 'history') || null,
     midpoint: chartData.datasets.find((ds) => ds.role === 'midpoint') || null,
-    bandUpper: chartData.datasets.find((ds) => ds.role === 'band-upper') || null,
-    bandLower: chartData.datasets.find((ds) => ds.role === 'band-lower') || null,
   }), [chartData]);
 
   const yBounds = useMemo(() => {
@@ -717,8 +690,8 @@ export default function PriceChart({
   const chartOptions = useMemo(() => {
     const firstFinitePrice = stats.first;
     const latestClosePrice = stats.last;
-    const bandLowerData = datasetByRole.bandLower?.data || null;
-    const bandUpperData = datasetByRole.bandUpper?.data || null;
+    const bandLowerData = chartData.bandLower || null;
+    const bandUpperData = chartData.bandUpper || null;
     const splitIndex = chartData.forecastSplitIndex;
     const labels = chartData.labels;
 
@@ -862,8 +835,8 @@ export default function PriceChart({
     const basePrice = isEstimatePoint ? stats.last : stats.first;
     const change = Number.isFinite(basePrice) ? price - basePrice : 0;
     const changePct = Number.isFinite(basePrice) && basePrice > 0 ? (change / basePrice) * 100 : 0;
-    const low = isEstimatePoint ? Number(datasetByRole.bandLower?.data?.[scrubIndex]) : NaN;
-    const high = isEstimatePoint ? Number(datasetByRole.bandUpper?.data?.[scrubIndex]) : NaN;
+    const low = isEstimatePoint ? Number(chartData.bandLower?.[scrubIndex]) : NaN;
+    const high = isEstimatePoint ? Number(chartData.bandUpper?.[scrubIndex]) : NaN;
     return {
       isEstimate: isEstimatePoint,
       price,
@@ -1075,15 +1048,15 @@ export default function PriceChart({
             <p className="estimate-inline-explanation">
               {estimate.isConformalCalibrated ? (
                 <>
-                  The shaded band is a volatility-scaled online conformal range targeting 80% pointwise coverage per session (validated at{' '}
+                  The continuation line after the anchor dot averages the upper and lower bounds of a volatility-scaled online conformal range targeting 80% pointwise coverage per session (validated at{' '}
                   {((estimate.intervalCalibration?.empirical_oos_pointwise_coverage ?? 0.7915) * 100).toFixed(1)}% across 20,839 out-of-sample US &amp; LSE forecasts; simultaneous 7-day full-path coverage is ~
-                  {((estimate.intervalCalibration?.empirical_oos_simultaneous_7d_coverage ?? 0.5045) * 100).toFixed(0)}%), and the dashed line averages its upper and lower bounds.
+                  {((estimate.intervalCalibration?.empirical_oos_simultaneous_7d_coverage ?? 0.5045) * 100).toFixed(0)}%).
                   {estimate.pointEstimate != null ? ` The model point forecast is ${formatMoneyLocal(estimate.pointEstimate, currencySymbol)}.` : ' The model point forecast is unavailable.'}
-                  {' '}Experimental estimate, not financial advice.
+                  {' '}Hover any future session or open Table to inspect exact bounds. Experimental estimate, not financial advice.
                 </>
               ) : (
                 <>
-                  The shaded band shows the historical error range (experimental) anchored at the latest close, and the dashed line averages its upper and lower bounds.
+                  The continuation line after the anchor dot averages the upper and lower bounds of the historical error range (experimental) anchored at the latest close.
                   {estimate.pointEstimate != null ? ` The model point forecast is ${formatMoneyLocal(estimate.pointEstimate, currencySymbol)}.` : ' The model point forecast is unavailable.'}
                   {' '}Coverage for this refit is unverified and has not been certified.
                 </>
@@ -1171,7 +1144,7 @@ export default function PriceChart({
 
       {hasData && (
         <p id={descriptionId} className="sr-only">
-          Solid line: recorded historical closes. Shaded region and dashed line: {(estimate?.rangeLabel || 'historical error range (experimental)').toLowerCase()} and seven-session midpoint. Use the Table button in the chart toolbar to read exact values.
+          Colored line: recorded historical closes. Neutral silver continuation line after the anchor dot: seven-session midpoint with {(estimate?.rangeLabel || 'historical error range (experimental)').toLowerCase()} available on hover and in the Table view. Use the Table button in the chart toolbar to read exact values.
         </p>
       )}
 
@@ -1185,7 +1158,7 @@ export default function PriceChart({
                   <th scope="col">Date</th>
                   <th scope="col">Historical close</th>
                   <th scope="col">Range midpoint</th>
-                  {datasetByRole.bandLower && datasetByRole.bandUpper && (
+                  {chartData.bandLower && chartData.bandUpper && (
                     <th scope="col">{estimate?.rangeLabel || 'Historical error range (experimental)'}</th>
                   )}
                 </tr>
@@ -1195,14 +1168,14 @@ export default function PriceChart({
                   const isForecastPoint = chartData.forecastSplitIndex != null && index > chartData.forecastSplitIndex;
                   const histVal = datasetByRole.history?.data?.[index];
                   const midVal = isForecastPoint ? datasetByRole.midpoint?.data?.[index] : null;
-                  const lowVal = isForecastPoint ? datasetByRole.bandLower?.data?.[index] : null;
-                  const highVal = isForecastPoint ? datasetByRole.bandUpper?.data?.[index] : null;
+                  const lowVal = isForecastPoint ? chartData.bandLower?.[index] : null;
+                  const highVal = isForecastPoint ? chartData.bandUpper?.[index] : null;
                   return (
                     <tr key={`${date}-${index}`}>
                       <th scope="row">{date}</th>
                       <td className="mono">{formatMoneyLocal(histVal, currencySymbol)}</td>
                       <td className="mono">{formatMoneyLocal(midVal, currencySymbol)}</td>
-                      {datasetByRole.bandLower && datasetByRole.bandUpper && (
+                      {chartData.bandLower && chartData.bandUpper && (
                         <td className="mono">
                           {Number.isFinite(lowVal) && Number.isFinite(highVal)
                             ? `${formatMoneyLocal(lowVal, currencySymbol)} – ${formatMoneyLocal(highVal, currencySymbol)}`
