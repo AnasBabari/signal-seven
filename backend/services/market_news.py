@@ -600,8 +600,8 @@ def _fetch_from_sec_edgar(symbol: str, *, timeout_seconds: float = 4.0) -> list[
         filing_date = str(filing_dates[i] if i < len(filing_dates) else "").strip()
         if not filing_date and acc_time:
             filing_date = acc_time[:10]
-        acc_num = str(accession_numbers[i] if i < len(accession_numbers) else "").strip()
-        primary_doc = str(primary_docs[i] if i < len(primary_docs) else "").strip()
+        acc_num = str((accession_numbers[i] if i < len(accession_numbers) else "") or "").strip()
+        primary_doc = str((primary_docs[i] if i < len(primary_docs) else "") or "").strip()
         desc = str(descriptions[i] if i < len(descriptions) else form).strip() or form
         raw_item_code = str(items_list[i] if i < len(items_list) else "").strip()
 
@@ -615,10 +615,11 @@ def _fetch_from_sec_edgar(symbol: str, *, timeout_seconds: float = 4.0) -> list[
             if matched:
                 item_detail = f" ({', '.join(matched)})"
 
-        if acc_num and primary_doc:
+        if acc_num:
             acc_compact = acc_num.replace("-", "")
+            document = primary_doc or f"{acc_num}-index.htm"
             filing_url = (
-                f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_compact}/{primary_doc}"
+                f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_compact}/{document}"
             )
         else:
             filing_url = f"https://www.sec.gov/edgar/browse/?CIK={cik}"
@@ -817,8 +818,8 @@ def fetch_recent_news(
                 if cached_sec:
                     sec_filings = _format_sec_filings(symbol, cik, cached_sec)[:5]
 
-    oldest = datetime.min.replace(tzinfo=UTC)
-    items.sort(key=lambda it: _publication_instant(it) or oldest, reverse=True)
+    headlines, sec_filings = _distinct_news_records(items, sec_filings)
+    items = sec_filings if provider_used == "sec_edgar" else headlines
 
     market_close_utc = get_exchange_market_close(symbol)
     for it in (*items, *sec_filings):
@@ -856,15 +857,66 @@ def fetch_recent_news(
     return dict(result)
 
 
-def _news_item_key(item: dict[str, Any]) -> tuple[str, ...]:
-    if item.get("id"):
-        return ("id", str(item["id"]))
-    if item.get("url"):
-        return ("url", str(item["url"]))
-    title = str(item.get("title") or item.get("headline") or item.get("form") or "")
-    if title:
-        return ("title", title, str(item.get("published_at") or item.get("filing_date") or ""))
-    return ("record", str(id(item)))
+def _news_item_keys(item: dict[str, Any]) -> set[tuple[str, ...]]:
+    keys = set()
+    identifier = str(item.get("id") or "").strip()
+    if identifier:
+        keys.add(("id", identifier))
+    url = str(item.get("url") or "").strip()
+    if url and not url.startswith("https://www.sec.gov/edgar/browse/"):
+        keys.add(("url", url))
+    if not keys:
+        title = str(item.get("title") or item.get("headline") or item.get("form") or "")
+        if title:
+            keys.add(
+                ("title", title, str(item.get("published_at") or item.get("filing_date") or ""))
+            )
+    return keys
+
+
+def _distinct_news_records(
+    items: list[dict[str, Any]], filings: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Collapse ID and document URL aliases, preserving authoritative filing metadata."""
+    records = [(item, True) for item in filings]
+    for item in items:
+        source = str(item.get("source") or "").strip().lower()
+        is_filing = (
+            item.get("kind") == "sec_filing"
+            or item.get("type") == "sec_filing"
+            or item.get("is_sec_filing") is True
+            or item.get("form")
+            or item.get("filing_type")
+            or str(item.get("provider") or "").strip().lower() == "sec_edgar"
+            or source == "sec"
+            or source.startswith("sec ")
+        )
+        records.append((item, bool(is_filing)))
+
+    # The feeds are small. Joining overlapping groups also handles a later record
+    # whose ID and URL connect two previously independent provider records.
+    groups: list[tuple[set[tuple[str, ...]], list[tuple[dict[str, Any], bool]]]] = []
+    for item, is_filing in records:
+        keys = _news_item_keys(item)
+        members = [(item, is_filing)]
+        for index in range(len(groups) - 1, -1, -1):
+            group_keys, group_members = groups[index]
+            if keys & group_keys:
+                keys.update(group_keys)
+                members = group_members + members
+                groups.pop(index)
+        groups.append((keys, members))
+
+    oldest = datetime.min.replace(tzinfo=UTC)
+    headlines, sec_filings = [], []
+    for _, members in groups:
+        filing_items = [item for item, is_filing in members if is_filing]
+        candidates = filing_items or [item for item, _ in members]
+        newest = max(candidates, key=lambda item: _publication_instant(item) or oldest)
+        (sec_filings if filing_items else headlines).append(newest)
+    for collection in (headlines, sec_filings):
+        collection.sort(key=lambda item: _publication_instant(item) or oldest, reverse=True)
+    return headlines, sec_filings
 
 
 def _extract_compound_score(item: dict[str, Any]) -> float | None:
@@ -909,14 +961,7 @@ def summarize_cached_news_context(ticker: str) -> dict[str, Any]:
     items = [it for it in (cached.get("items") or []) if isinstance(it, dict)]
     sec_filings = [it for it in (cached.get("sec_filings") or []) if isinstance(it, dict)]
 
-    # The SEC fallback exposes each filing in both collections in the public news feed.
-    filing_keys = {_news_item_key(filing) for filing in sec_filings}
-    filing_keys.update(
-        _news_item_key(it)
-        for it in items
-        if it.get("kind") == "sec_filing" or it.get("provider") == "sec_edgar" or it.get("form")
-    )
-    headlines = [it for it in items if _news_item_key(it) not in filing_keys]
+    headlines, distinct_filings = _distinct_news_records(items, sec_filings)
     compounds: list[float] = []
     counts = {"positive": 0, "negative": 0, "neutral": 0}
     for item in headlines:
@@ -952,7 +997,7 @@ def summarize_cached_news_context(ticker: str) -> dict[str, Any]:
         "sentiment_label": sentiment_label,
         "mean_compound": round(mean_compound, 4) if mean_compound is not None else None,
         "headline_count": len(headlines),
-        "sec_filing_count": len(filing_keys),
+        "sec_filing_count": len(distinct_filings),
         "bullish_count": counts["positive"],
         "bearish_count": counts["negative"],
         "neutral_count": counts["neutral"],

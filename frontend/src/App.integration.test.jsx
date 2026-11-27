@@ -1075,6 +1075,19 @@ describe('simplified forecast app', () => {
     expect(headlines[2]).not.toHaveTextContent(/tone/i);
   });
 
+  it('keeps separate filings that link to the same EDGAR company page', async () => {
+    const url = 'https://www.sec.gov/edgar/browse/?CIK=0000789019';
+    mockNews([], [
+      { id: 'sec-1', title: 'Quarterly results', form: '10-Q', url },
+      { id: 'sec-2', title: 'Current report', form: '8-K', url },
+    ]);
+    window.history.replaceState(null, '', '/?ticker=MSFT');
+    render(<App />);
+    const preview = within(await screen.findByLabelText('MSFT latest financial news'));
+    expect(await preview.findByRole('link', { name: /quarterly results/i })).toBeVisible();
+    expect(preview.getByRole('link', { name: /current report/i })).toBeVisible();
+  });
+
   it('keeps a mean at the aggregate threshold despite cancellation between headline scores', async () => {
     mockNews([-0.9, 0.08, 0.24, 0.9].map((sentiment, index) => ({
       id: `scored-${index}`, title: `Scored headline ${index}`, sentiment,

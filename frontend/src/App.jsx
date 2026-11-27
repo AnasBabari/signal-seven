@@ -267,7 +267,7 @@ function mergeNewsAndFilings(news) {
     const title = item.title || item.headline;
     const keys = [];
     if (id) keys.push(`id:${id}`);
-    if (url) keys.push(`url:${url}`);
+    if (url && !url.startsWith('https://www.sec.gov/edgar/browse/')) keys.push(`url:${url}`);
     if (!keys.length && title) keys.push(`title:${title}:${timestamp}`);
 
     const duplicateIndex = keys.map((key) => indexByKey.get(key)).find((index) => index !== undefined);

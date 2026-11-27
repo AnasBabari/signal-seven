@@ -199,6 +199,42 @@ def test_mixed_cache_counts_filing_identities_across_both_collections(identity: 
     assert summary["bullish_count"] == summary["neutral_count"] == 0
 
 
+def test_distinct_documents_drive_both_news_and_forecast(monkeypatch) -> None:
+    shared_url = "https://wire.example/earnings"
+    filing_url = "https://www.sec.gov/Archives/edgar/data/report.htm"
+    items = [
+        {"id": "wire-old", "url": shared_url, "published_at": "2026-11-20", "sentiment": 0.8},
+        {"id": "wire-new", "url": shared_url, "published_at": "2026-11-22", "sentiment": -0.2},
+        {"id": "syndicated", "url": filing_url, "sentiment": 0.8},
+    ]
+    filings = [{"id": "sec-1", "url": filing_url, "form": "8-K"}]
+    monkeypatch.setattr(market_news, "_fetch_from_yahoo", lambda _: items)
+    monkeypatch.setattr(market_news, "_call_sec_edgar", lambda *_: filings)
+    monkeypatch.setattr(market_news, "get_exchange_market_close", lambda _: None)
+    feed = market_news.fetch_recent_news("MSFT", include_sec_filings=True)
+    assert [item["id"] for item in feed["items"]] == ["wire-new"]
+    assert feed["sec_filings"] == filings
+    digest = market_news.summarize_cached_news_context("MSFT")
+    assert (digest["headline_count"], digest["sec_filing_count"]) == (1, 1)
+    assert digest["sentiment_label"] == "bearish"
+    assert digest["mean_compound"] == -0.2
+
+
+def test_missing_primary_document_links_to_each_accession(monkeypatch) -> None:
+    accessions = ["0000789019-26-000101", "0000789019-26-000102"]
+    recent = {"form": ["8-K", "10-Q"], "accessionNumber": accessions, "primaryDocument": [None]}
+    transport = httpx.MockTransport(
+        lambda _: httpx.Response(200, json={"filings": {"recent": recent}})
+    )
+    with httpx.Client(transport=transport) as client:
+        monkeypatch.setattr(market_news, "_get_http_client", lambda: client)
+        filings = market_news._fetch_from_sec_edgar("MSFT")
+    assert {item["url"] for item in filings} == {
+        f"https://www.sec.gov/Archives/edgar/data/789019/{acc.replace('-', '')}/{acc}-index.htm"
+        for acc in accessions
+    }
+
+
 @pytest.mark.parametrize("with_score", [False, True])
 def test_invalid_scores_are_excluded_from_sentiment_only(with_score: bool) -> None:
     items = [
