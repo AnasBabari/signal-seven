@@ -127,30 +127,41 @@ const lastPricePlugin = {
   },
 };
 
-// Shaded estimate region past the last actual
+// Horizontal dotted anchor baseline & solid circular dot where history meets estimate
 const forecastRegionPlugin = {
   id: 't212ForecastRegion',
-  beforeDraw: (chart) => {
+  afterDatasetsDraw: (chart) => {
     const { ctx, chartArea, scales } = chart;
-    const splitIdx = chart.options.plugins?.t212ForecastRegion?.splitIndex;
-    if (splitIdx == null || !scales.x || !chartArea) return;
+    const cfg = chart.options.plugins?.t212ForecastRegion;
+    const splitIdx = cfg?.splitIndex;
+    if (splitIdx == null || !scales.x || !scales.y || !chartArea) return;
     const xPos = scales.x.getPixelForValue(splitIdx);
     if (xPos == null || xPos < chartArea.left || xPos > chartArea.right) return;
+
+    const historyData = chart.data?.datasets?.[0]?.data;
+    const rawAnchor = cfg?.anchorValue ?? (Array.isArray(historyData) ? historyData[splitIdx] : null);
+    const anchorVal = Number(rawAnchor);
+    if (!Number.isFinite(anchorVal)) return;
+    const yPos = scales.y.getPixelForValue(anchorVal);
+    if (yPos < chartArea.top || yPos > chartArea.bottom) return;
+
+    const dotColor = chart.data?.datasets?.[0]?.borderColor || '#9ca3af';
     ctx.save();
-    ctx.fillStyle = 'rgba(56,189,248,0.06)';
-    ctx.fillRect(xPos, chartArea.top, chartArea.right - xPos, chartArea.bottom - chartArea.top);
+    // Subtle full-width horizontal dotted baseline aligned with the anchor dot
     ctx.beginPath();
-    ctx.setLineDash([4, 4]);
-    ctx.strokeStyle = 'rgba(56,189,248,0.35)';
-    ctx.lineWidth = 1.5;
-    ctx.moveTo(xPos, chartArea.top);
-    ctx.lineTo(xPos, chartArea.bottom);
+    ctx.setLineDash([2, 6]);
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.24)';
+    ctx.lineWidth = 1.25;
+    ctx.moveTo(chartArea.left, yPos);
+    ctx.lineTo(chartArea.right, yPos);
     ctx.stroke();
     ctx.setLineDash([]);
-    ctx.fillStyle = '#38bdf8';
-    ctx.font = '600 10px Inter, sans-serif';
-    ctx.textAlign = 'left';
-    ctx.fillText('ESTIMATE', xPos + 6, chartArea.top + 14);
+
+    // Crisp solid circular anchor dot at the transition point
+    ctx.beginPath();
+    ctx.arc(xPos, yPos, 4.5, 0, Math.PI * 2);
+    ctx.fillStyle = dotColor;
+    ctx.fill();
     ctx.restore();
   },
 };
@@ -200,6 +211,7 @@ export default function PriceChart({
   const [showForecast, setShowForecast] = useState(true);
   const [isExpanded, setIsExpanded] = useState(false);
   const [showEstimateInfo, setShowEstimateInfo] = useState(false);
+  const [scrubIndex, setScrubIndex] = useState(null);
 
   const chartRef = useRef(null);
   const wrapRef = useRef(null);
@@ -291,6 +303,7 @@ export default function PriceChart({
     });
     setView(null);
     setIsInteracting(false);
+    setScrubIndex(null);
   }, [effectiveHistory, dailyCount, hasIntraday, intradayAvailable, ticker, selectedRange]);
 
   const activeRange = rangeId || (selectedRange && available.includes(selectedRange) ? selectedRange : defaultRangeId(available));
@@ -381,17 +394,15 @@ export default function PriceChart({
   const colors = useMemo(() => {
     const up = stats.up;
     return {
-      line: up ? '#00f5a0' : '#ff5c5c',
-      areaTop: up ? 'rgba(0,245,160,0.18)' : 'rgba(255,92,92,0.18)',
-      grid: 'rgba(255,255,255,0.05)',
-      tick: '#94a3b8',
-      tooltipBg: '#0d0d1a',
-      tooltipTitle: '#e8e8f0',
+      line: up ? '#22c55e' : '#ef4444',
+      areaTop: up ? 'rgba(34, 197, 94, 0.14)' : 'rgba(239, 68, 68, 0.13)',
+      grid: 'rgba(255, 255, 255, 0.06)',
+      tick: '#8e939e',
+      tooltipBg: '#1e2026',
+      tooltipTitle: '#f3f4f6',
       tooltipBody: '#cbd5e1',
-      tooltipBorder: 'rgba(255,255,255,0.12)',
-      estimate: '#38bdf8',
-      bandBorder: 'rgba(56, 189, 248, 0.28)',
-      bandFill: 'rgba(56, 189, 248, 0.12)',
+      tooltipBorder: 'rgba(255, 255, 255, 0.10)',
+      estimate: '#9ca3af',
     };
   }, [stats.up]);
 
@@ -400,7 +411,7 @@ export default function PriceChart({
     const historyPadded = [...points.prices];
     const datasets = [];
 
-    // Main historical price dataset
+    // Main historical price dataset — sharp angular zero-tension polyline with clean cutoff gradient
     datasets.push({
       role: 'history',
       label: 'Price',
@@ -411,19 +422,24 @@ export default function PriceChart({
         if (!chartArea) return colors.areaTop;
         const grad = ctx.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
         grad.addColorStop(0, colors.areaTop);
+        grad.addColorStop(0.85, 'rgba(255, 255, 255, 0)');
         grad.addColorStop(1, 'transparent');
         return grad;
       },
-      borderWidth: 2,
+      borderWidth: 1.9,
       pointRadius: 0,
-      pointHoverRadius: 5,
+      pointHoverRadius: 4.5,
       pointHoverBackgroundColor: colors.line,
-      tension: 0.25,
-      fill: true,
+      pointHoverBorderColor: '#181a1f',
+      pointHoverBorderWidth: 1.5,
+      tension: 0,
+      fill: 'start',
       spanGaps: false,
     });
 
     let forecastSplitIndex = null;
+    let bandLower = null;
+    let bandUpper = null;
 
     if (canShowForecastOverlay && estimate?.series?.length > 0 && points.prices.length > 0) {
       estimate.futureDates.forEach((futureDate) => {
@@ -439,50 +455,25 @@ export default function PriceChart({
         && estimate.upperSeries.length === estimate.series.length;
 
       if (hasRangeBand) {
-        const activeRangeLabel = estimate.rangeLabel || 'Historical error range (experimental)';
-        datasets.push({
-          role: 'band-upper',
-          label: activeRangeLabel,
-          data: padAnchoredForecast(estimate.upperSeries, anchorClose, forecastSplitIndex),
-          borderColor: colors.bandBorder,
-          backgroundColor: colors.bandFill,
-          borderWidth: 1,
-          pointRadius: 0,
-          pointHoverRadius: 0,
-          pointHitRadius: 0,
-          tension: 0.25,
-          fill: '+1',
-          spanGaps: false,
-        });
-
-        datasets.push({
-          role: 'band-lower',
-          label: `${activeRangeLabel} — lower`,
-          data: padAnchoredForecast(estimate.lowerSeries, anchorClose, forecastSplitIndex),
-          borderColor: colors.bandBorder,
-          backgroundColor: 'transparent',
-          borderWidth: 1,
-          pointRadius: 0,
-          pointHoverRadius: 0,
-          pointHitRadius: 0,
-          tension: 0.25,
-          fill: false,
-          spanGaps: false,
-        });
+        bandLower = padAnchoredForecast(estimate.lowerSeries, anchorClose, forecastSplitIndex);
+        bandUpper = padAnchoredForecast(estimate.upperSeries, anchorClose, forecastSplitIndex);
       }
 
+      // Single clean solid neutral-silver continuation line (no shaded cone on canvas)
       datasets.push({
         role: 'midpoint',
         label: 'Range midpoint — experimental',
         data: padAnchoredForecast(estimate.series, anchorClose, forecastSplitIndex),
         borderColor: colors.estimate,
         backgroundColor: 'transparent',
-        borderWidth: 2.2,
-        borderDash: [6, 4],
+        borderWidth: 1.9,
+        borderDash: [],
         pointRadius: 0,
-        pointHoverRadius: 6,
+        pointHoverRadius: 4.5,
         pointHoverBackgroundColor: colors.estimate,
-        tension: 0.25,
+        pointHoverBorderColor: '#181a1f',
+        pointHoverBorderWidth: 1.5,
+        tension: 0,
         fill: false,
         spanGaps: false,
       });
@@ -491,6 +482,8 @@ export default function PriceChart({
     return {
       labels,
       forecastSplitIndex,
+      bandLower,
+      bandUpper,
       datasets,
     };
   }, [points, canShowForecastOverlay, estimate, colors]);
@@ -498,8 +491,6 @@ export default function PriceChart({
   const datasetByRole = useMemo(() => ({
     history: chartData.datasets.find((ds) => ds.role === 'history') || null,
     midpoint: chartData.datasets.find((ds) => ds.role === 'midpoint') || null,
-    bandUpper: chartData.datasets.find((ds) => ds.role === 'band-upper') || null,
-    bandLower: chartData.datasets.find((ds) => ds.role === 'band-lower') || null,
   }), [chartData]);
 
   const yBounds = useMemo(() => {
@@ -699,8 +690,8 @@ export default function PriceChart({
   const chartOptions = useMemo(() => {
     const firstFinitePrice = stats.first;
     const latestClosePrice = stats.last;
-    const bandLowerData = datasetByRole.bandLower?.data || null;
-    const bandUpperData = datasetByRole.bandUpper?.data || null;
+    const bandLowerData = chartData.bandLower || null;
+    const bandUpperData = chartData.bandUpper || null;
     const splitIndex = chartData.forecastSplitIndex;
     const labels = chartData.labels;
 
@@ -709,14 +700,21 @@ export default function PriceChart({
       maintainAspectRatio: false,
       animation: (isInteracting || isZoomed) ? false : { duration: 250 },
       interaction: { mode: 'index', intersect: false },
+      onHover: (_event, elements) => {
+        const nextIdx = elements?.[0]?.index;
+        setScrubIndex((prev) => {
+          const resolved = Number.isInteger(nextIdx) ? nextIdx : null;
+          return prev === resolved ? prev : resolved;
+        });
+      },
       plugins: {
         legend: { display: false },
-        t212ForecastRegion: { splitIndex },
+        t212ForecastRegion: { splitIndex, anchorValue: latestClosePrice },
         t212LastPrice: canShowForecastOverlay
           ? undefined
           : {
             value: latestClosePrice,
-            color: stats.change > 0 ? '#00f5a0' : stats.change < 0 ? '#ff5c5c' : '#94a3b8',
+            color: stats.change > 0 ? '#22c55e' : stats.change < 0 ? '#ef4444' : '#9ca3af',
             label: formatMoneyLocal(latestClosePrice, currencySymbol),
           },
         tooltip: {
@@ -778,13 +776,20 @@ export default function PriceChart({
         },
         y: {
           ...yBounds,
-          position: 'right',
+          position: 'left',
+          border: { display: false },
           ticks: {
             color: colors.tick,
-            font: { family: 'JetBrains Mono, monospace', size: 10 },
+            maxTicksLimit: 4,
+            padding: 10,
+            font: { family: 'Inter, system-ui, sans-serif', size: 11 },
             callback: (v) => formatMoneyLocal(Number(v), currencySymbol),
           },
-          grid: { color: colors.grid },
+          grid: {
+            display: true,
+            color: colors.grid,
+            drawTicks: false,
+          },
         },
       },
     };
@@ -810,6 +815,7 @@ export default function PriceChart({
     setRangeId(id);
     setView(null);
     setIsInteracting(false);
+    setScrubIndex(null);
     onRangeChange?.(id);
   }, [onRangeChange]);
 
@@ -818,8 +824,35 @@ export default function PriceChart({
     setIsInteracting(false);
   }, []);
 
-  const changeClass = stats.change > 0 ? 'up' : stats.change < 0 ? 'down' : 'flat';
-  const sign = stats.change > 0 ? '+' : '';
+  const scrubDisplay = useMemo(() => {
+    if (scrubIndex == null || scrubIndex < 0 || scrubIndex >= chartData.labels.length) return null;
+    const isEstimatePoint = chartData.forecastSplitIndex != null && scrubIndex > chartData.forecastSplitIndex;
+    const rawVal = isEstimatePoint
+      ? datasetByRole.midpoint?.data?.[scrubIndex]
+      : datasetByRole.history?.data?.[scrubIndex];
+    const price = Number(rawVal);
+    if (!Number.isFinite(price)) return null;
+    const basePrice = isEstimatePoint ? stats.last : stats.first;
+    const change = Number.isFinite(basePrice) ? price - basePrice : 0;
+    const changePct = Number.isFinite(basePrice) && basePrice > 0 ? (change / basePrice) * 100 : 0;
+    const low = isEstimatePoint ? Number(chartData.bandLower?.[scrubIndex]) : NaN;
+    const high = isEstimatePoint ? Number(chartData.bandUpper?.[scrubIndex]) : NaN;
+    return {
+      isEstimate: isEstimatePoint,
+      price,
+      change,
+      changePct,
+      date: String(chartData.labels[scrubIndex] ?? ''),
+      low: Number.isFinite(low) ? low : null,
+      high: Number.isFinite(high) ? high : null,
+    };
+  }, [scrubIndex, chartData, datasetByRole, stats.first, stats.last]);
+
+  const heroPrice = scrubDisplay ? scrubDisplay.price : stats.last;
+  const heroChange = scrubDisplay ? scrubDisplay.change : stats.change;
+  const heroChangePct = scrubDisplay ? scrubDisplay.changePct : stats.changePct;
+  const changeClass = heroChange > 0 ? 'up' : heroChange < 0 ? 'down' : 'flat';
+  const sign = heroChange > 0 ? '+' : '';
   const dataDate = effectiveHistory?.asOf || (Array.isArray(effectiveHistory?.daily) ? effectiveHistory.daily.at(-1)?.d : null);
   const suppliedCompanyName = (companyName || forecastForTicker?.ticker_name || '').trim();
   const resolvedCompanyName = suppliedCompanyName && suppliedCompanyName.toUpperCase() !== String(ticker || '').toUpperCase()
@@ -937,35 +970,43 @@ export default function PriceChart({
           <div className="t212-title-row">
             {resolvedCompanyName && <span className="t212-company-name">{resolvedCompanyName}</span>}
             <span className="t212-ticker">{ticker}</span>
+            {dataDate && !points.isIntraday && !scrubDisplay && (
+              <span className="t212-data-date" title={`Market data through ${dataDate}`}>
+                Data through {dataDate}
+              </span>
+            )}
           </div>
 
           {hasData ? (
             <div className="t212-metrics-row">
-              <strong className="t212-price mono">
-                {formatMoneyLocal(stats.last, currencySymbol)}
+              <strong className={`t212-price ${scrubDisplay?.isEstimate ? 'is-estimate' : ''}`}>
+                {formatMoneyLocal(heroPrice, currencySymbol)}
               </strong>
               {points.prices.filter(Number.isFinite).length >= 2 && (
                 <span className={`t212-change ${changeClass}`}>
-                  {sign}{formatMoneyLocal(stats.change, currencySymbol)} ({sign}{stats.changePct.toFixed(2)}%)
+                  {sign}{formatMoneyLocal(heroChange, currencySymbol)} ({sign}{heroChangePct.toFixed(2)}%)
                 </span>
               )}
-              <span className="t212-range-name">
-                {activeRange === 'MAX' ? `Available history · ${points.labels[0]}–${points.labels.at(-1)}` : activeRange}
-              </span>
-              {dataDate && !points.isIntraday && (
-                <span className="t212-data-date" title={`Market data through ${dataDate}`}>
-                  Data through {dataDate}
+              {scrubDisplay ? (
+                <>
+                  <span className="t212-scrub-date">
+                    {scrubDisplay.isEstimate ? `Estimate · ${scrubDisplay.date}` : scrubDisplay.date}
+                  </span>
+                  {scrubDisplay.isEstimate && scrubDisplay.low != null && scrubDisplay.high != null && (
+                    <span className="t212-scrub-range">
+                      Range: {formatMoneyLocal(scrubDisplay.low, currencySymbol)} – {formatMoneyLocal(scrubDisplay.high, currencySymbol)}
+                    </span>
+                  )}
+                </>
+              ) : (
+                <span className="t212-range-name">
+                  {activeRange === 'MAX' ? `Available history · ${points.labels[0]}–${points.labels.at(-1)}` : activeRange}
                 </span>
               )}
             </div>
           ) : (
             <span className="t212-price-skeleton" aria-hidden="true" />
           )}
-        </div>
-
-        {/* Restrained Toolbar */}
-        <div className="t212-restrained-toolbar">
-          {renderRangeAndOverlayControls(false)}
         </div>
       </div>
 
@@ -1007,15 +1048,15 @@ export default function PriceChart({
             <p className="estimate-inline-explanation">
               {estimate.isConformalCalibrated ? (
                 <>
-                  The shaded band is a volatility-scaled online conformal range targeting 80% pointwise coverage per session (validated at{' '}
+                  The continuation line after the anchor dot averages the upper and lower bounds of a volatility-scaled online conformal range targeting 80% pointwise coverage per session (validated at{' '}
                   {((estimate.intervalCalibration?.empirical_oos_pointwise_coverage ?? 0.7915) * 100).toFixed(1)}% across 20,839 out-of-sample US &amp; LSE forecasts; simultaneous 7-day full-path coverage is ~
-                  {((estimate.intervalCalibration?.empirical_oos_simultaneous_7d_coverage ?? 0.5045) * 100).toFixed(0)}%), and the dashed line averages its upper and lower bounds.
+                  {((estimate.intervalCalibration?.empirical_oos_simultaneous_7d_coverage ?? 0.5045) * 100).toFixed(0)}%).
                   {estimate.pointEstimate != null ? ` The model point forecast is ${formatMoneyLocal(estimate.pointEstimate, currencySymbol)}.` : ' The model point forecast is unavailable.'}
-                  {' '}Experimental estimate, not financial advice.
+                  {' '}Hover any future session or open Table to inspect exact bounds. Experimental estimate, not financial advice.
                 </>
               ) : (
                 <>
-                  The shaded band shows the historical error range (experimental) anchored at the latest close, and the dashed line averages its upper and lower bounds.
+                  The continuation line after the anchor dot averages the upper and lower bounds of the historical error range (experimental) anchored at the latest close.
                   {estimate.pointEstimate != null ? ` The model point forecast is ${formatMoneyLocal(estimate.pointEstimate, currencySymbol)}.` : ' The model point forecast is unavailable.'}
                   {' '}Coverage for this refit is unverified and has not been certified.
                 </>
@@ -1029,6 +1070,8 @@ export default function PriceChart({
       <div
         className={`t212-chart-wrap ${isExpanded ? 'expanded' : ''}`}
         ref={wrapRef}
+        onPointerLeave={() => setScrubIndex(null)}
+        onMouseLeave={() => setScrubIndex(null)}
         role={isExpanded ? 'dialog' : undefined}
         aria-modal={isExpanded ? 'true' : undefined}
         aria-label={isExpanded ? 'Expanded price chart' : undefined}
@@ -1094,9 +1137,14 @@ export default function PriceChart({
         </div>
       </div>
 
+      {/* Trading 212 Bottom Range & Controls Bar */}
+      <div className="t212-restrained-toolbar t212-bottom-bar">
+        {renderRangeAndOverlayControls(false)}
+      </div>
+
       {hasData && (
         <p id={descriptionId} className="sr-only">
-          Solid line: recorded historical closes. Shaded region and dashed line: {(estimate?.rangeLabel || 'historical error range (experimental)').toLowerCase()} and seven-session midpoint. Use the Table button in the chart toolbar to read exact values.
+          Colored line: recorded historical closes. Neutral silver continuation line after the anchor dot: seven-session midpoint with {(estimate?.rangeLabel || 'historical error range (experimental)').toLowerCase()} available on hover and in the Table view. Use the Table button in the chart toolbar to read exact values.
         </p>
       )}
 
@@ -1110,7 +1158,7 @@ export default function PriceChart({
                   <th scope="col">Date</th>
                   <th scope="col">Historical close</th>
                   <th scope="col">Range midpoint</th>
-                  {datasetByRole.bandLower && datasetByRole.bandUpper && (
+                  {chartData.bandLower && chartData.bandUpper && (
                     <th scope="col">{estimate?.rangeLabel || 'Historical error range (experimental)'}</th>
                   )}
                 </tr>
@@ -1120,14 +1168,14 @@ export default function PriceChart({
                   const isForecastPoint = chartData.forecastSplitIndex != null && index > chartData.forecastSplitIndex;
                   const histVal = datasetByRole.history?.data?.[index];
                   const midVal = isForecastPoint ? datasetByRole.midpoint?.data?.[index] : null;
-                  const lowVal = isForecastPoint ? datasetByRole.bandLower?.data?.[index] : null;
-                  const highVal = isForecastPoint ? datasetByRole.bandUpper?.data?.[index] : null;
+                  const lowVal = isForecastPoint ? chartData.bandLower?.[index] : null;
+                  const highVal = isForecastPoint ? chartData.bandUpper?.[index] : null;
                   return (
                     <tr key={`${date}-${index}`}>
                       <th scope="row">{date}</th>
                       <td className="mono">{formatMoneyLocal(histVal, currencySymbol)}</td>
                       <td className="mono">{formatMoneyLocal(midVal, currencySymbol)}</td>
-                      {datasetByRole.bandLower && datasetByRole.bandUpper && (
+                      {chartData.bandLower && chartData.bandUpper && (
                         <td className="mono">
                           {Number.isFinite(lowVal) && Number.isFinite(highVal)
                             ? `${formatMoneyLocal(lowVal, currencySymbol)} – ${formatMoneyLocal(highVal, currencySymbol)}`

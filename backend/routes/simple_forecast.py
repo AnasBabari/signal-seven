@@ -17,7 +17,7 @@ from data_pipeline import (
     _download_ohlcv,
 )
 from routes.common import limiter, validate_ticker
-from services.market_news import fetch_recent_news
+from services.market_news import fetch_recent_news, summarize_cached_news_context
 from services.simple_forecast import FORECAST_DAYS, SUPPORTED_TICKERS, train_and_forecast
 from services.training_budget import TrainingBusyError
 
@@ -65,6 +65,7 @@ def forecast(
         total_ms = (time.perf_counter() - route_started) * 1000.0
         result = {
             **result,
+            "news_context": summarize_cached_news_context(symbol),
             "timing": {**result.get("timing", {}), "data_ms": data_ms, "total_ms": total_ms},
         }
         response = JSONResponse(content=result)

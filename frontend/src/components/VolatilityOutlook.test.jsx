@@ -71,6 +71,8 @@ describe('VolatilityOutlook', () => {
     expect(screen.getByText('Moderate')).toBeInTheDocument();
     expect(container.textContent).not.toMatch(/G3|XGBoost|HAR|QLIKE/i);
     expect(screen.getAllByText(/historical validation panel/).length).toBeGreaterThan(0);
+    expect(container.querySelector('.horizon-rows-list.horizon-grid-3col')).not.toBeNull();
+    expect(container.querySelectorAll('.horizon-card')).toHaveLength(3);
   });
 
 

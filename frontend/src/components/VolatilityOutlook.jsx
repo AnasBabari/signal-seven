@@ -116,7 +116,7 @@ export default function VolatilityOutlook({
         </div>
       </div>
 
-      <div className="horizon-rows-list">
+      <div className="horizon-rows-list horizon-grid-3col">
         {rows.map(({ horizon, entry }) => {
           const annual = annualisedFromResponse(entry);
           const trailingValue = entry?.evidence?.trailing_annualized_volatility_60d;
@@ -127,17 +127,17 @@ export default function VolatilityOutlook({
           const adjustment = annual != null && trailing > 0 ? (annual / trailing - 1) : null;
 
           return (
-            <article key={horizon} className="horizon-compact-row">
+            <article key={horizon} className="horizon-compact-row horizon-card">
               <div className="horizon-main-line">
                 <div className="horizon-badge-col">
                   <strong className="horizon-name">{horizon} sessions</strong>
                   <RiskPill level={riskLevel} />
                 </div>
                 <div className="horizon-desc-col">
-                  <span className="horizon-plain-desc">{plainDesc}</span>
-                  <span className="horizon-annual-val mono">
+                  <span className="horizon-annual-val">
                     {formatAnnualized(annual)} annualised
                   </span>
+                  <span className="horizon-plain-desc">{plainDesc}</span>
                 </div>
               </div>
 

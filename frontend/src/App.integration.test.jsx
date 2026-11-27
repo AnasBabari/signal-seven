@@ -960,4 +960,59 @@ describe('simplified forecast app', () => {
     expect(screen.getByText('Microsoft Cloud Revenue Beats Quarterly Estimates')).toBeInTheDocument();
     expect(screen.queryByText('Annual Report Pursuant to Section 13 or 15(d)')).not.toBeInTheDocument();
   });
+
+  it('integrates search into topbar after submission without remounting input and shows Overview news preview with sentiment', async () => {
+    const baseFetch = global.fetch;
+    let newsCalls = 0;
+    global.fetch = vi.fn((url, init) => {
+      if (String(url).includes('/api/v1/news')) {
+        newsCalls += 1;
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            ticker: 'MSFT',
+            status: 'available',
+            provider: 'yahoo',
+            items: [
+              { id: 'n1', title: 'Microsoft AI cloud demand accelerates', source: 'Reuters', published_at: '2026-09-03T16:00:00Z', sentiment: 0.48, sentiment_label: 'bullish' },
+              { id: 'n2', title: 'Enterprise Copilot seats surpass milestone', source: 'Bloomberg', published_at: '2026-09-02T14:00:00Z', sentiment: 0.35, sentiment_label: 'bullish' },
+              { id: 'n3', title: 'Azure margin outlook remains steady', source: 'CNBC', published_at: '2026-09-01T12:00:00Z', sentiment: 0.12, sentiment_label: 'bullish' },
+              { id: 'n4', title: 'Fourth headline hidden in Overview preview', source: 'WSJ', published_at: '2026-08-31T10:00:00Z', sentiment: 0.05, sentiment_label: 'neutral' },
+            ],
+            sec_filings: [
+              { id: 's1', kind: 'sec_filing', form: '8-K', title: 'Current Report (Form 8-K)', source: 'SEC EDGAR', filing_date: '2026-09-02' },
+            ],
+          }),
+        });
+      }
+      return baseFetch(url, init);
+    });
+
+    const user = userEvent.setup();
+    const { container } = render(<App />);
+    await screen.findByText('Forecast service reachable');
+
+    const inputBefore = screen.getByLabelText(/stock ticker/i);
+    await user.type(inputBefore, 'MSFT');
+    await user.click(screen.getByRole('button', { name: /view outlook/i }));
+    await screen.findByText(/Range midpoint — experimental:/i);
+
+    // Search form sits inside sticky topbar once active, preserving exact input DOM node
+    expect(container.querySelector('.topbar .stock-search-form')).not.toBeNull();
+    expect(screen.getByLabelText(/stock ticker/i)).toBe(inputBefore);
+
+    // Overview tab displays compact Latest News & Filings preview with sentiment + top 3 items
+    const preview = await screen.findByLabelText('MSFT latest financial news');
+    expect(preview).toHaveTextContent(/Positive sentiment/i);
+    expect(preview).toHaveTextContent('Microsoft AI cloud demand accelerates');
+    expect(preview).toHaveTextContent('Enterprise Copilot seats surpass milestone');
+    expect(preview).toHaveTextContent('Azure margin outlook remains steady');
+    expect(preview).not.toHaveTextContent('Fourth headline hidden in Overview preview');
+
+    // Clicking "View all news" switches to News tab with zero extra fetches
+    const callsBeforeSwitch = newsCalls;
+    await user.click(screen.getByRole('button', { name: /view all news/i }));
+    expect(screen.getByRole('tab', { name: /news/i })).toHaveAttribute('aria-selected', 'true');
+    expect(newsCalls).toBe(callsBeforeSwitch);
+  });
 });

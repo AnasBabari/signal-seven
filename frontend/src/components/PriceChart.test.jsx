@@ -91,40 +91,33 @@ describe('PriceChart', () => {
     expect(screen.getByText(/\+5\.56%/)).toBeInTheDocument();
   });
 
-  it('switches ranges and overlays the anchored midpoint and historical error range (experimental)', () => {
+  it('switches ranges and overlays a clean solid silver continuation line without a canvas cone while keeping range in tooltip and table', () => {
     usePriceHistory.mockReturnValue({ history: historyFixture(300, true), loading: false, error: '', retry: vi.fn() });
     render(<PriceChart ticker="MSFT" currencySymbol="$" forecast={forecastFixture} />);
     fireEvent.click(screen.getByRole('button', { name: '1M' }));
     expect(screen.getByRole('button', { name: '1M' })).toHaveAttribute('aria-pressed', 'true');
     const roles = lastChartProps.data.datasets.map((ds) => ds.role);
-    expect(roles).toEqual(['history', 'band-upper', 'band-lower', 'midpoint']);
+    expect(roles).toEqual(['history', 'midpoint']);
     const labels = lastChartProps.data.datasets.map((ds) => ds.label);
-    expect(labels).toContain('Price');
-    expect(labels).toContain('Historical error range (experimental)');
-    expect(labels).toContain('Range midpoint — experimental');
+    expect(labels).toEqual(['Price', 'Range midpoint — experimental']);
     expect(labels.join(' ')).not.toMatch(/calibrated|empirical band/i);
     expect(lastChartProps.data.labels.length).toBe(22 + 7);
-    // Midpoint and range band are smoothly anchored at index N-1 (21) with last close (399).
-    const upperBand = lastChartProps.data.datasets.find((ds) => ds.role === 'band-upper');
-    const lowerBand = lastChartProps.data.datasets.find((ds) => ds.role === 'band-lower');
+    // Solid neutral silver continuation line anchored cleanly at index N-1 (21) with last close (399).
     const midpoint = lastChartProps.data.datasets.find((ds) => ds.role === 'midpoint');
-    expect(upperBand.fill).toBe('+1');
-    expect(upperBand.data[21]).toBe(399);
-    expect(lowerBand.data[21]).toBe(399);
-    expect(midpoint.borderDash).toEqual([6, 4]);
+    expect(midpoint.borderDash).toEqual([]);
+    expect(midpoint.borderColor).toBe('#9ca3af');
+    expect(midpoint.fill).toBe(false);
     expect(midpoint.data.slice(0, 21).every((v) => v == null)).toBe(true);
     expect(midpoint.data[21]).toBe(399);
     expect(lastChartProps.data.forecastSplitIndex).toBe(21);
     expect(lastChartProps.plugins.map((p) => p.id)).toContain('t212ForecastRegion');
 
-    // Tooltip filter excludes band datasets and N-1 anchored midpoint duplicate
+    // Tooltip filter excludes N-1 anchored midpoint duplicate
     const { filter, callbacks } = lastChartProps.options.plugins.tooltip;
-    expect(filter({ dataset: upperBand, dataIndex: 22 })).toBe(false);
-    expect(filter({ dataset: lowerBand, dataIndex: 22 })).toBe(false);
     expect(filter({ dataset: midpoint, dataIndex: 21 })).toBe(false);
     expect(filter({ dataset: midpoint, dataIndex: 22 })).toBe(true);
 
-    // Midpoint tooltip computes % relative to latest close (399) and afterLabel renders Range
+    // Midpoint tooltip still computes % relative to latest close (399) and afterLabel renders Range
     const midLabel = callbacks.label({ dataset: midpoint, parsed: { y: 401 }, dataIndex: 22 });
     expect(midLabel).toContain('$401.00');
     expect(midLabel).toContain('+0.50%');
@@ -195,14 +188,13 @@ describe('PriceChart', () => {
     expect(labels).toContain('Range midpoint — experimental');
   });
 
-  it('renders subtle experimental error range band without claiming calibrated or volatility cone labels', () => {
+  it('renders clean continuation line without shaded cone datasets or unverified calibration claims', () => {
     usePriceHistory.mockReturnValue({ history: historyFixture(300, true), loading: false, error: '', meta: null, retry: vi.fn() });
-    render(<PriceChart ticker="MSFT" currencySymbol="$" forecast={forecastFixture} />);
-    const labels = lastChartProps.data.datasets.map((ds) => ds.label);
-    expect(labels).toContain('Historical error range (experimental)');
-    expect(labels).not.toContain('Expected volatility range (upper)');
-    expect(labels).not.toContain('Expected volatility range (lower)');
-    expect(labels.join(' ')).not.toMatch(/calibrated|empirical band/i);
+    const { container } = render(<PriceChart ticker="MSFT" currencySymbol="$" forecast={forecastFixture} />);
+    const roles = lastChartProps.data.datasets.map((ds) => ds.role);
+    expect(roles).toEqual(['history', 'midpoint']);
+    expect(container.querySelector('.chart-estimate-bar')).toHaveTextContent('Historical error range (experimental)');
+    expect(container.querySelector('.chart-estimate-bar').textContent).not.toMatch(/calibrated|empirical band/i);
   });
 
   it('refuses manufactured history instead of charting it', () => {
@@ -311,4 +303,89 @@ it('lazily fetches /api/v1/intraday when user clicks 24H and history has intrada
   await act(async () => { await Promise.resolve(); });
   expect(btn24h).toHaveAttribute('aria-pressed', 'true');
   expect(lastChartProps.data.labels).toHaveLength(6);
+});
+
+it('renders Trading 212 bottom range bar below canvas with crisp zero-tension polyline, faint horizontal gridlines, and dotted anchor baseline', () => {
+  usePriceHistory.mockReturnValue({ history: historyFixture(300, true), loading: false, error: '', retry: vi.fn() });
+  const { container } = render(<PriceChart ticker="MSFT" currencySymbol="$" forecast={forecastFixture} />);
+
+  const chartWrap = container.querySelector('.t212-chart-wrap');
+  const bottomBar = container.querySelector('.t212-bottom-bar');
+  expect(chartWrap).not.toBeNull();
+  expect(bottomBar).not.toBeNull();
+  // Bottom range bar sits strictly after chart canvas wrap in DOM order
+  expect(chartWrap.compareDocumentPosition(bottomBar) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(bottomBar.querySelector('.t212-range-tabs')).not.toBeNull();
+  expect(bottomBar.querySelector('.table-toggle-btn')).not.toBeNull();
+
+  // Sharp zero-tension angular polyline matching reference display (no shaded cone datasets)
+  const historyDs = lastChartProps.data.datasets.find((ds) => ds.role === 'history');
+  const midpointDs = lastChartProps.data.datasets.find((ds) => ds.role === 'midpoint');
+  expect(lastChartProps.data.datasets).toHaveLength(2);
+  expect(historyDs.tension).toBe(0);
+  expect(midpointDs.tension).toBe(0);
+  expect(midpointDs.borderDash).toEqual([]);
+
+  // Subtle horizontal reference gridlines + horizontal dotted anchor baseline with solid dot
+  expect(lastChartProps.options.scales.y.grid.display).toBe(true);
+  expect(lastChartProps.options.plugins.t212ForecastRegion.anchorValue).toBe(399);
+
+  const regionPlugin = lastChartProps.plugins.find((p) => p.id === 't212ForecastRegion');
+  const calls = [];
+  const fakeCtx = {
+    save: () => {},
+    restore: () => {},
+    beginPath: () => {},
+    setLineDash: (d) => calls.push(['dash', d]),
+    moveTo: (x, y) => calls.push(['moveTo', x, y]),
+    lineTo: (x, y) => calls.push(['lineTo', x, y]),
+    stroke: () => calls.push(['stroke']),
+    arc: (x, y, r) => calls.push(['arc', x, y, r]),
+    fill: () => calls.push(['fill']),
+  };
+  regionPlugin.afterDatasetsDraw({
+    ctx: fakeCtx,
+    chartArea: { left: 20, right: 420, top: 10, bottom: 260 },
+    scales: {
+      x: { getPixelForValue: () => 280 },
+      y: { getPixelForValue: () => 120 },
+    },
+    data: lastChartProps.data,
+    options: lastChartProps.options,
+  });
+  // Draws horizontal dotted baseline across chartArea.left..right at anchor y=120 (no vertical wall)
+  expect(calls).toContainEqual(['moveTo', 20, 120]);
+  expect(calls).toContainEqual(['lineTo', 420, 120]);
+  expect(calls).not.toContainEqual(['moveTo', 280, 10]);
+  // Draws solid circular anchor dot at (280, 120)
+  expect(calls.some((c) => c[0] === 'arc' && c[1] === 280 && c[2] === 120 && c[3] >= 4)).toBe(true);
+});
+
+it('scrubs hero price, delta, date, and estimate range live on hover and resets on pointer leave', () => {
+  usePriceHistory.mockReturnValue({ history: historyFixture(300, false), loading: false, error: '', retry: vi.fn() });
+  const { container } = render(<PriceChart ticker="MSFT" currencySymbol="$" forecast={forecastFixture} />);
+
+  // Default hero displays latest close ($399.00)
+  expect(container.querySelector('.t212-price')).toHaveTextContent('$399.00');
+  expect(typeof lastChartProps.options.onHover).toBe('function');
+
+  // 1. Hover historical bar index 5 (1M slice starts at close=378, index 5 => close=383)
+  act(() => {
+    lastChartProps.options.onHover({ type: 'mousemove' }, [{ datasetIndex: 0, index: 5 }]);
+  });
+  expect(container.querySelector('.t212-price')).toHaveTextContent('$383.00');
+  expect(container.querySelector('.t212-scrub-date')).not.toBeNull();
+
+  // 2. Hover forecast bar index 24 (splitIndex=21, offset=2 => futureDates[2]='2024-06-05', midpoint=403, range=399..407)
+  act(() => {
+    lastChartProps.options.onHover({ type: 'mousemove' }, [{ datasetIndex: 1, index: 24 }]);
+  });
+  expect(container.querySelector('.t212-price')).toHaveTextContent('$403.00');
+  expect(container.querySelector('.t212-scrub-date')).toHaveTextContent('2024-06-05');
+  expect(container.querySelector('.t212-scrub-range')).toHaveTextContent('$399.00 – $407.00');
+
+  // 3. Pointer leave restores latest close cleanly
+  fireEvent.pointerLeave(container.querySelector('.t212-chart-wrap'));
+  expect(container.querySelector('.t212-price')).toHaveTextContent('$399.00');
+  expect(container.querySelector('.t212-scrub-date')).toBeNull();
 });
