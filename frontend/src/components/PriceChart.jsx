@@ -216,8 +216,54 @@ export default function PriceChart({
   const chartRef = useRef(null);
   const wrapRef = useRef(null);
   const dragRef = useRef(null);
+  const touchScrubRef = useRef(false);
   const reportedRef = useRef(null);
   const expandBtnRef = useRef(null);
+
+  const clearScrub = useCallback(() => {
+    setScrubIndex(null);
+    if (!touchScrubRef.current) return;
+    touchScrubRef.current = false;
+    const chart = chartRef.current;
+    if (!chart) return;
+    chart.setActiveElements([]);
+    chart.tooltip?.setActiveElements([], { x: 0, y: 0 });
+    chart.render();
+  }, []);
+
+  const scrubTouch = (event) => {
+    if (event.pointerType !== 'touch' || !event.isPrimary) return;
+    const chart = chartRef.current;
+    if (!chart?.canvas || event.target !== chart.canvas) return;
+    const { left, top } = chart.canvas.getBoundingClientRect();
+    const position = { x: event.clientX - left, y: event.clientY - top };
+    if (!chart.isPointInArea(position)) {
+      clearScrub();
+      return;
+    }
+
+    const elements = chart.getElementsAtEventForMode(event.nativeEvent, 'index', { axis: 'x', intersect: false }, false);
+    chart.setActiveElements(elements);
+    chart.tooltip?.setActiveElements(elements, position);
+    chart.render();
+    touchScrubRef.current = elements.length > 0;
+    setScrubIndex(elements[0]?.index ?? null);
+  };
+
+  useEffect(() => {
+    const clearTouchScrub = () => {
+      if (touchScrubRef.current) clearScrub();
+    };
+    const dismissOutside = (event) => {
+      if (event.target !== chartRef.current?.canvas) clearTouchScrub();
+    };
+    window.addEventListener('scroll', clearTouchScrub, { passive: true });
+    document.addEventListener('pointerdown', dismissOutside);
+    return () => {
+      window.removeEventListener('scroll', clearTouchScrub);
+      document.removeEventListener('pointerdown', dismissOutside);
+    };
+  }, [clearScrub]);
 
   const forecastForTicker = forecast && forecast.ticker === String(ticker || '').toUpperCase() ? forecast : null;
 
@@ -303,8 +349,8 @@ export default function PriceChart({
     });
     setView(null);
     setIsInteracting(false);
-    setScrubIndex(null);
-  }, [effectiveHistory, dailyCount, hasIntraday, intradayAvailable, ticker, selectedRange]);
+    clearScrub();
+  }, [effectiveHistory, dailyCount, hasIntraday, intradayAvailable, ticker, selectedRange, clearScrub]);
 
   const activeRange = rangeId || (selectedRange && available.includes(selectedRange) ? selectedRange : defaultRangeId(available));
 
@@ -651,6 +697,7 @@ export default function PriceChart({
     const handleKeyDown = (e) => {
       if (e.key === 'Escape') {
         e.preventDefault();
+        clearScrub();
         setIsExpanded(false);
       }
       if (e.key === 'Tab') {
@@ -672,16 +719,17 @@ export default function PriceChart({
       document.body.style.overflow = previousOverflow;
       expandBtnRef.current?.focus();
     };
-  }, [isExpanded]);
+  }, [isExpanded, clearScrub]);
 
   const toggleExpand = useCallback(() => {
+    clearScrub();
     setIsExpanded((prev) => {
       if (prev) {
         setTimeout(() => expandBtnRef.current?.focus(), 0);
       }
       return !prev;
     });
-  }, []);
+  }, [clearScrub]);
 
   const handleChartErrorChange = useCallback((hasError) => {
     if (hasError) setTableOpen(true);
@@ -700,6 +748,8 @@ export default function PriceChart({
       maintainAspectRatio: false,
       animation: (isInteracting || isZoomed) ? false : { duration: 250 },
       interaction: { mode: 'index', intersect: false },
+      // Touch uses pointer events so browser scrolling can cancel the selection.
+      events: ['mousemove', 'mouseout', 'click'],
       onHover: (_event, elements) => {
         const nextIdx = elements?.[0]?.index;
         setScrubIndex((prev) => {
@@ -815,9 +865,9 @@ export default function PriceChart({
     setRangeId(id);
     setView(null);
     setIsInteracting(false);
-    setScrubIndex(null);
+    clearScrub();
     onRangeChange?.(id);
-  }, [onRangeChange]);
+  }, [onRangeChange, clearScrub]);
 
   const resetZoom = useCallback(() => {
     setView(null);
@@ -827,16 +877,15 @@ export default function PriceChart({
   const scrubDisplay = useMemo(() => {
     if (scrubIndex == null || scrubIndex < 0 || scrubIndex >= chartData.labels.length) return null;
     const isEstimatePoint = chartData.forecastSplitIndex != null && scrubIndex > chartData.forecastSplitIndex;
-    const rawVal = isEstimatePoint
+    const price = isEstimatePoint
       ? datasetByRole.midpoint?.data?.[scrubIndex]
       : datasetByRole.history?.data?.[scrubIndex];
-    const price = Number(rawVal);
     if (!Number.isFinite(price)) return null;
     const basePrice = isEstimatePoint ? stats.last : stats.first;
     const change = Number.isFinite(basePrice) ? price - basePrice : 0;
     const changePct = Number.isFinite(basePrice) && basePrice > 0 ? (change / basePrice) * 100 : 0;
-    const low = isEstimatePoint ? Number(chartData.bandLower?.[scrubIndex]) : NaN;
-    const high = isEstimatePoint ? Number(chartData.bandUpper?.[scrubIndex]) : NaN;
+    const low = chartData.bandLower?.[scrubIndex];
+    const high = chartData.bandUpper?.[scrubIndex];
     return {
       isEstimate: isEstimatePoint,
       price,
@@ -970,40 +1019,44 @@ export default function PriceChart({
           <div className="t212-title-row">
             {resolvedCompanyName && <span className="t212-company-name">{resolvedCompanyName}</span>}
             <span className="t212-ticker">{ticker}</span>
-            {dataDate && !points.isIntraday && !scrubDisplay && (
-              <span className="t212-data-date" title={`Market data through ${dataDate}`}>
+            {dataDate && !points.isIntraday && (
+              <span className="t212-data-date" aria-hidden={Boolean(scrubDisplay)} title={`Market data through ${dataDate}`}>
                 Data through {dataDate}
               </span>
             )}
           </div>
 
           {hasData ? (
-            <div className="t212-metrics-row">
-              <strong className={`t212-price ${scrubDisplay?.isEstimate ? 'is-estimate' : ''}`}>
-                {formatMoneyLocal(heroPrice, currencySymbol)}
-              </strong>
-              {points.prices.filter(Number.isFinite).length >= 2 && (
-                <span className={`t212-change ${changeClass}`}>
-                  {sign}{formatMoneyLocal(heroChange, currencySymbol)} ({sign}{heroChangePct.toFixed(2)}%)
-                </span>
-              )}
-              {scrubDisplay ? (
-                <>
-                  <span className="t212-scrub-date">
-                    {scrubDisplay.isEstimate ? `Estimate · ${scrubDisplay.date}` : scrubDisplay.date}
+            <>
+              <div className="t212-metrics-row">
+                <strong className={`t212-price ${scrubDisplay?.isEstimate ? 'is-estimate' : ''}`}>
+                  {formatMoneyLocal(heroPrice, currencySymbol)}
+                </strong>
+                {points.prices.filter(Number.isFinite).length >= 2 && (
+                  <span className={`t212-change ${changeClass}`}>
+                    {sign}{formatMoneyLocal(heroChange, currencySymbol)} ({sign}{heroChangePct.toFixed(2)}%)
                   </span>
-                  {scrubDisplay.isEstimate && scrubDisplay.low != null && scrubDisplay.high != null && (
-                    <span className="t212-scrub-range">
-                      Range: {formatMoneyLocal(scrubDisplay.low, currencySymbol)} – {formatMoneyLocal(scrubDisplay.high, currencySymbol)}
+                )}
+              </div>
+              <div className={`t212-chart-readout${canShowForecastOverlay ? ' with-estimate' : ''}`}>
+                {scrubDisplay ? (
+                  <>
+                    <span className="t212-scrub-date">
+                      {scrubDisplay.isEstimate ? `Estimate · ${scrubDisplay.date}` : scrubDisplay.date}
                     </span>
-                  )}
-                </>
-              ) : (
-                <span className="t212-range-name">
-                  {activeRange === 'MAX' ? `Available history · ${points.labels[0]}–${points.labels.at(-1)}` : activeRange}
-                </span>
-              )}
-            </div>
+                    {scrubDisplay.isEstimate && scrubDisplay.low != null && scrubDisplay.high != null && (
+                      <span className="t212-scrub-range">
+                        Range: {formatMoneyLocal(scrubDisplay.low, currencySymbol)} – {formatMoneyLocal(scrubDisplay.high, currencySymbol)}
+                      </span>
+                    )}
+                  </>
+                ) : (
+                  <span className="t212-range-name">
+                    {activeRange === 'MAX' ? `Available history · ${points.labels[0]}–${points.labels.at(-1)}` : activeRange}
+                  </span>
+                )}
+              </div>
+            </>
           ) : (
             <span className="t212-price-skeleton" aria-hidden="true" />
           )}
@@ -1070,8 +1123,6 @@ export default function PriceChart({
       <div
         className={`t212-chart-wrap ${isExpanded ? 'expanded' : ''}`}
         ref={wrapRef}
-        onPointerLeave={() => setScrubIndex(null)}
-        onMouseLeave={() => setScrubIndex(null)}
         role={isExpanded ? 'dialog' : undefined}
         aria-modal={isExpanded ? 'true' : undefined}
         aria-label={isExpanded ? 'Expanded price chart' : undefined}
@@ -1115,7 +1166,18 @@ export default function PriceChart({
           </div>
         )}
 
-        <div className="t212-canvas-viewport">
+        <div
+          className="t212-canvas-viewport"
+          onPointerDown={scrubTouch}
+          onPointerMove={scrubTouch}
+          onPointerCancel={(event) => {
+            if (event.pointerType === 'touch') clearScrub();
+          }}
+          onPointerLeave={(event) => {
+            // A tap also emits pointerleave when the implicit touch capture ends.
+            if (event.pointerType !== 'touch') clearScrub();
+          }}
+        >
           {!showLoading && !showIntradayLoading && !showError && effectiveHistory && points.labels.length > 0 && (
             <React.Suspense fallback={<div className="loading-text">Loading Chart…</div>}>
               <LazyLineChart

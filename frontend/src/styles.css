@@ -146,7 +146,7 @@ button { cursor: pointer; background: none; border: none; }
   border-bottom: 1px solid transparent;
 }
 
-.topbar.topbar-landing .brand { grid-column: 1; grid-row: 1; }
+.topbar.topbar-landing .topbar-brand { grid-column: 1; grid-row: 1; }
 .topbar.topbar-landing .topbar-right { grid-column: 2; grid-row: 1; justify-self: end; }
 .topbar.topbar-landing .topbar-search-slot {
   grid-column: 1 / -1;
@@ -536,6 +536,7 @@ main { padding-top: 18px; }
 .t212-price-block {
   display: flex;
   flex-direction: column;
+  flex: 1;
   gap: 4px;
   min-width: 0;
 }
@@ -569,6 +570,8 @@ main { padding-top: 18px; }
   background: rgba(255, 255, 255, 0.04);
 }
 
+.t212-data-date[aria-hidden="true"] { visibility: hidden; }
+
 .t212-metrics-row {
   display: flex;
   align-items: baseline;
@@ -601,6 +604,15 @@ main { padding-top: 18px; }
 .t212-change.up { color: var(--emerald); background: var(--emerald-soft); }
 .t212-change.down { color: var(--bearish); background: var(--crimson-soft); }
 .t212-change.flat { color: var(--text-muted); background: rgba(255, 255, 255, 0.05); }
+
+.t212-chart-readout {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  align-content: start;
+  column-gap: 10px;
+  min-height: 22px;
+}
 
 .t212-range-name {
   font-size: 12px;
@@ -1417,9 +1429,10 @@ footer {
   .opening-search-section .input-field-group input { flex: none; width: 100%; height: 48px; }
   .opening-search-section .view-outlook-btn { width: 100%; height: 46px; }
   .compact-search-section .input-field-group { position: static; }
-  .symbol-feedback { position: static; max-width: 100%; }
+  .symbol-feedback { position: static; display: block; margin-top: 6px; max-width: 100%; }
   .t212-chart-section { padding: 16px 14px 12px; }
   .t212-chart-wrap { height: clamp(250px, 40vh, 360px); }
+  .t212-chart-readout.with-estimate { min-height: 44px; }
   .results, .panel, .t212-chart-section { min-width: 0; }
   .chart-estimate-bar { padding: 8px 10px; }
   .estimate-summary-text { flex-wrap: nowrap; font-size: 12px; gap: 6px; }

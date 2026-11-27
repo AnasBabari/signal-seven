@@ -13,7 +13,9 @@ test('first visit waits for a stock selection without a placeholder chart', asyn
   page.on('request', (request) => calls.push(request.url()));
   await installFixtures(page);
   await page.goto('/');
-  await expect(page.getByLabel('Stock ticker')).toHaveValue('');
+  const main = page.getByRole('main');
+  await expect(main.getByRole('heading', { name: 'Which stock would you like to explore?' })).toBeVisible();
+  await expect(main.getByLabel('Stock ticker')).toHaveValue('');
   await expect(page.locator('#chartContainer')).toHaveCount(0);
   expect(calls.some((url) => /\/api\/v1\/(history|forecast)/.test(url))).toBe(false);
 });
@@ -45,7 +47,10 @@ test('valid estimate, modal keyboard containment and supporting tab navigation',
   await expect(dialog).toHaveCount(0);
   await expect(expand).toBeFocused();
   expect(await page.locator('body').evaluate((element) => element.style.overflow)).not.toBe('hidden');
-  await page.getByRole('tab', { name: 'Overview', exact: true }).focus();
+  await page.getByRole('button', { name: /View all news/ }).press('Enter');
+  await expect(page.getByRole('tab', { name: /News/ })).toBeFocused();
+  await expect(page.getByRole('tabpanel', { name: /News/ })).toBeVisible();
+  await page.getByRole('tab', { name: 'Overview', exact: true }).press('Enter');
   await page.keyboard.press('ArrowRight');
   await expect(page.getByRole('tab', { name: /News/ })).toBeFocused();
   await expect(page.getByText('[Example fixture] Company update for layout verification')).toBeVisible();
@@ -83,13 +88,26 @@ for (const [name, overrides] of [
   });
 }
 
-test('touch scrolling can pass the chart without trapping the page', async ({ browser, baseURL }) => {
+test('touch taps select chart points and scrolling past the chart clears the selection', async ({ browser, baseURL }) => {
   const context = await browser.newContext({ baseURL, viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
   const page = await context.newPage();
   await installFixtures(page);
   await submit(page);
+  await expect(page.locator('.chart-estimate-bar')).toBeVisible();
   await page.locator('#chartContainer canvas').scrollIntoViewIfNeeded();
   const canvas = await page.locator('#chartContainer canvas').boundingBox();
+  const tapX = Math.round(canvas.x + canvas.width * 0.85);
+  const tapY = Math.round(canvas.y + canvas.height / 2);
+  const scrubDate = page.locator('.t212-scrub-date');
+
+  await page.touchscreen.tap(tapX, tapY);
+  await expect(scrubDate).toContainText('Estimate');
+  await expect(page.locator('.t212-scrub-range')).toBeVisible();
+  await page.touchscreen.tap(3, 3);
+  await expect(scrubDate).toHaveCount(0);
+  await page.touchscreen.tap(tapX, tapY);
+  await expect(scrubDate).toBeVisible();
+
   const startY = Math.min(canvas.y + canvas.height - 20, 750);
   const startScroll = await page.evaluate(() => window.scrollY);
   const client = await context.newCDPSession(page);
@@ -99,6 +117,8 @@ test('touch scrolling can pass the chart without trapping the page', async ({ br
   }
   await client.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(startScroll + 60);
+  await expect(scrubDate).toHaveCount(0);
+  await expect(page.locator('.t212-price')).toHaveText('$450.00');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await context.close();
 });

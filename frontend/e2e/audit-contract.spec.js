@@ -212,6 +212,54 @@ test('mobile 390x844: 0px autocomplete overlap, Enter dismisses suggestions, opa
   await saveShot(page, testInfo, 'm4-mobile-390x844.png');
 });
 
+test('mobile 320px: compact ticker feedback stays below the submit button', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 700 });
+  await installFixtures(page);
+  await submit(page);
+  const input = page.getByRole('combobox', { name: 'Stock ticker' });
+  const submitButton = page.getByRole('button', { name: 'View outlook' });
+  await input.fill('INVALID!');
+  await input.press('Enter');
+
+  const alert = page.getByRole('search').getByRole('alert');
+  await expect(alert).toBeVisible();
+  await expect(input).toHaveAccessibleDescription(/Please enter a valid stock ticker/);
+  const [alertBox, submitBox] = await Promise.all([alert.boundingBox(), submitButton.boundingBox()]);
+  expect(alertBox.y).toBeGreaterThanOrEqual(submitBox.y + submitBox.height);
+  await submitButton.click();
+
+  await input.fill('MSFT');
+  await expect(alert).toHaveCount(0);
+  await submitButton.click();
+  await expect(page.locator('#chartContainer canvas')).toBeVisible();
+});
+
+test('mobile 390px: historical and estimate scrubbing keep the canvas in place', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await installFixtures(page);
+  await submit(page);
+  await expect(page.locator('.chart-estimate-bar')).toBeVisible();
+  await page.evaluate(() => document.fonts.ready);
+
+  const canvas = page.locator('#chartContainer canvas');
+  const bounds = await canvas.boundingBox();
+  const y = bounds.y + bounds.height / 2;
+  const scrubDate = page.locator('.t212-scrub-date');
+  await page.mouse.move(bounds.x + bounds.width * 0.3, y);
+  await expect(scrubDate).toHaveText(/^\d{4}-\d{2}-\d{2}$/);
+  expect(Math.abs((await canvas.boundingBox()).y - bounds.y)).toBeLessThan(1);
+
+  await page.mouse.move(bounds.x + bounds.width * 0.85, y);
+  await expect(scrubDate).toContainText('Estimate');
+  await expect(page.locator('.t212-scrub-range')).toBeVisible();
+  expect(Math.abs((await canvas.boundingBox()).y - bounds.y)).toBeLessThan(1);
+
+  await page.mouse.move(3, 3);
+  await expect(scrubDate).toHaveCount(0);
+  await expect(page.locator('.t212-price')).toHaveText('$450.00');
+  expect(Math.abs((await canvas.boundingBox()).y - bounds.y)).toBeLessThan(1);
+});
+
 test('deep link hydration (?ticker=MSFT&range=MAX&tab=news), SEC filings, lazy 24H intraday, and browser Back work end-to-end', async ({ page }) => {
   const requests = [];
   page.on('request', (req) => requests.push(req.url()));

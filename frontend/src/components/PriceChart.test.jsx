@@ -385,7 +385,7 @@ it('scrubs hero price, delta, date, and estimate range live on hover and resets 
   expect(container.querySelector('.t212-scrub-range')).toHaveTextContent('$399.00 – $407.00');
 
   // 3. Pointer leave restores latest close cleanly
-  fireEvent.pointerLeave(container.querySelector('.t212-chart-wrap'));
+  fireEvent.pointerLeave(container.querySelector('.t212-canvas-viewport'));
   expect(container.querySelector('.t212-price')).toHaveTextContent('$399.00');
   expect(container.querySelector('.t212-scrub-date')).toBeNull();
 });
